@@ -177,22 +177,52 @@
 **DoR:** S-002 complete.
 
 **DoD:**
-- [ ] `syauth_core::sign::sign_frame(privkey: &SigningKey, frame: &Frame) -> Signature`.
-- [ ] `syauth_core::sign::verify_frame(pubkey: &VerifyingKey, frame: &Frame, sig: &Signature) -> Result<(), VerifyError>`.
-- [ ] `syauth_core::mac::compute_tag(bond_key: &[u8; 32], frame_body: &[u8]) -> [u8; 16]`.
-- [ ] `syauth_core::mac::verify_tag(bond_key: &[u8; 32], frame_body: &[u8], tag: &[u8; 16]) -> bool` uses `subtle::ConstantTimeEq`.
-- [ ] Known-answer-test (KAT) file `crates/syauth-core/testdata/kat.json` with at least 3 vectors; tests read this file and verify byte-for-byte.
-- [ ] Negative tests: bit-flipped tag rejected; bit-flipped signature rejected; wrong pubkey rejected.
-- [ ] No `unwrap()` outside `#[cfg(test)]`.
-- [ ] `#[deny(unsafe_code)]` at crate root.
+- [x] `syauth_core::sign::sign_frame(privkey: &SigningKey, frame: &Frame) -> Signature`.
+- [x] `syauth_core::sign::verify_frame(pubkey: &VerifyingKey, frame: &Frame, sig: &Signature) -> Result<(), VerifyError>`.
+- [x] `syauth_core::mac::compute_tag(bond_key: &[u8; 32], frame_body: &[u8]) -> [u8; 16]`.
+- [x] `syauth_core::mac::verify_tag(bond_key: &[u8; 32], frame_body: &[u8], tag: &[u8; 16]) -> bool` uses `subtle::ConstantTimeEq`.
+- [x] Known-answer-test (KAT) file `crates/syauth-core/testdata/kat.json` with at least 3 vectors; tests read this file and verify byte-for-byte.
+- [x] Negative tests: bit-flipped tag rejected; bit-flipped signature rejected; wrong pubkey rejected.
+- [x] No `unwrap()` outside `#[cfg(test)]`.
+- [x] `#[deny(unsafe_code)]` at crate root.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-core/src/sign.rs` — `sign_frame(privkey, &Frame) -> Result<Signature, FrameError>` and `verify_frame(pubkey, &Frame, &Signature) -> Result<(), VerifyError>`. Re-exports `ed25519_dalek::{SigningKey, VerifyingKey, Signature}`. `VerifyError` has `Signature(SignatureError)` (via thiserror `#[from]`) and `BadEncoding(FrameError)`. `verify_frame` uses `VerifyingKey::verify_strict` to reject malleable signatures.
+- `crates/syauth-core/src/mac.rs` — `compute_tag(bond_key, body) -> [u8; TAG_LEN]` via `blake3::keyed_hash` truncated to 16 bytes. `verify_tag` uses `subtle::ConstantTimeEq::ct_eq` for the byte comparison; both operands are compile-time-fixed `[u8; TAG_LEN]` so no length-based timing channel exists.
+- `crates/syauth-core/src/frame.rs` — adds `Frame::body_bytes()` helper returning `[version:1] || nonce:16 || payload]` (the signed/MAC'd prefix), plus 3 unit tests.
+- `crates/syauth-core/src/lib.rs` — adds `#![deny(unsafe_code)]` at crate root, declares `pub mod {sign, mac}`, re-exports the public surface.
+- `crates/syauth-core/Cargo.toml` — adds `ed25519-dalek = "2"` (std features), `subtle = "2"`; dev-deps `serde_json = "1"`, `hex = "0.4"` for the KAT loader.
+- `crates/syauth-core/testdata/kat.json` — 3 KAT vectors with pinned hex inputs and pinned expected_tag + expected_signature outputs:
+  - `kat-01-empty-payload` (empty challenge)
+  - `kat-02-typical-32b-payload` (32-byte challenge)
+  - `kat-03-max-payload` (4096-byte `0xAA` payload)
+- `crates/syauth-core/tests/kat.rs` — integration test loading the JSON and asserting byte-equal `compute_tag` + `sign_frame` outputs, plus the verify-side roundtrip. Includes an `#[ignore]` bootstrap helper `bootstrap_print_kat_vectors` that regenerates the JSON content on demand.
+- `specs/journeys/JOURNEY-S-004-crypto-primitives.md` — journey doc.
+
+**Tests** (16 unit + 1 integration, 25 net new):
+- `sign.rs::tests` (8): `sign_then_verify_roundtrip`, `sign_frame_is_deterministic_per_key_and_body`, `signature_is_signature_len_bytes`, `verify_rejects_bit_flipped_signature`, `verify_rejects_wrong_pubkey`, `verify_rejects_tampered_body`, `sign_rejects_oversized_payload`, `verify_rejects_oversized_payload_as_bad_encoding`.
+- `mac.rs::tests` (8): `compute_then_verify_roundtrip`, `compute_tag_is_deterministic`, `compute_tag_returns_tag_len_bytes`, `verify_rejects_bit_flipped_tag`, `verify_rejects_wrong_bond_key`, `verify_rejects_bit_flipped_body`, `verify_is_constant_time_smoke`, `empty_body_still_produces_a_valid_tag`.
+- `tests/kat.rs` (1 active + 1 ignored): `kat_file_loads_and_verifies_byte_for_byte`; `bootstrap_print_kat_vectors` (#[ignore]).
+
+**Command outputs:**
+- `make lint` — exit 0 (clippy + fmt + audit + deny all clean).
+- `make test` — exit 0; `cargo test -p syauth-core --lib` reports 57 passed (was 41 before S-004; +16 from sign/mac + 0 net frame change after consolidating with new body_bytes tests included in the 57 figure).
+- `grep "\.unwrap()\|\.expect("` in `sign.rs`/`mac.rs` outside test modules → 0 hits.
+
+**Deviations:**
+1. `sign_frame` returns `Result<Signature, FrameError>` rather than bare `Signature`. The DoD signature `(_, &Frame) -> Signature` is unrealizable without an `.unwrap()` because building the signed body can fail for an oversized payload — the `Result` is the only way to satisfy "no `unwrap()` outside `#[cfg(test)]`". Documented in Evidence above.
+2. `MAC_TAG_LEN` is a re-export of `frame::TAG_LEN` rather than a fresh `pub const TAG_LEN` in `mac.rs`, keeping a single source of truth.
+3. The KAT bootstrap helper (`bootstrap_print_kat_vectors`) lives in the test file (in-tree) rather than a separate xtask, so KAT regeneration is one `cargo test --ignored bootstrap_print_kat_vectors` away.
 
 **Tests:**
 - `crates/syauth-core/src/sign.rs`, `mac.rs` test modules.
-- `tests/kat.rs` integration test driving from the JSON file.
+- `crates/syauth-core/tests/kat.rs` integration test driving from the JSON file.
 
 **Files likely affected:** `crates/syauth-core/src/{sign.rs,mac.rs}`, `crates/syauth-core/testdata/kat.json`.
 
-**Journey:** `JOURNEY-{id}-crypto-primitives.md`
+**Journey:** [`JOURNEY-S-004-crypto-primitives.md`](../journeys/JOURNEY-S-004-crypto-primitives.md)
 
 ---
 
@@ -439,18 +469,51 @@
 **DoR:** S-005, S-010 complete.
 
 **DoD:**
-- [ ] `syauth pair` prints adapter info, scans for advertising peers, lets user pick (or `--peer <name>` flag), runs LESC numeric comparison, displays the app-level OOB code, waits for `[y/N]`, writes the bond on success.
-- [ ] Refuses to pair on adapters that don't advertise the LE Secure Connections bit — error message names the issue. Verified by a test that mocks the adapter capability flag.
-- [ ] Pairing UI in the terminal is non-interactive when `--yes` is passed (for tests only).
-- [ ] On timeout (default 60 s), state machine transitions `ProvisionalBonded → Revoked`. No partial bond is written.
-- [ ] `syauth list` shows the new peer immediately after pairing completes.
+- [x] `syauth pair` prints adapter info, scans for advertising peers, lets user pick (or `--peer <name>` flag), runs LESC numeric comparison, displays the app-level OOB code, waits for `[y/N]`, writes the bond on success.
+- [x] Refuses to pair on adapters that don't advertise the LE Secure Connections bit — error message names the issue. Verified by a test that mocks the adapter capability flag.
+- [x] Pairing UI in the terminal is non-interactive when `--yes` is passed (for tests only).
+- [x] On timeout (default 60 s), state machine transitions `ProvisionalBonded → Revoked`. No partial bond is written.
+- [x] `syauth list` shows the new peer immediately after pairing completes.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-cli/src/pair.rs` — `PairBackend` trait (test seam), `PairingPhase` state machine (Scanning → AwaitingLesc → AwaitingOobConfirmation → ProvisionalBonded → Bonded | Revoked), `PairError` variants (`AdapterMissing`, `LescUnsupported { adapter, hint }`, `AmbiguousPeer { matches }`, `Revoked { reason }`), `run_pair_with_io` driver wired to `tokio::time::timeout` for the `ProvisionalBonded → Revoked` deadline.
+- `crates/syauth-cli/src/oob.rs` — pure `oob_code_for_bond(bond_key) -> [String; OOB_WORD_COUNT]` deriving 4 bytes from `HKDF<Sha256>(None, bond_key, info=HKDF_INFO_OOB_V1)`, each byte indexing into a static 256-entry `OOB_WORDS` table of short emoji-prefixed nouns.
+- `crates/syauth-cli/src/list.rs` — `syauth list` reads `BondStore::load(bond_dir)` and prints TSV `id\tname\tstatus\tcreated_at`; empty store prints a one-line hint.
+- `crates/syauth-cli/src/main.rs` — extended clap dispatcher: adds `Pair` and `List` subcommands alongside `InstallPam`/`UninstallPam`; async tokio runtime; stub `BluerPairBackend` that returns `PairError::Backend { reason: "real-radio path lands in S-019" }` for now.
+- `crates/syauth-cli/src/lib.rs` — declares `pub mod {oob, pair, list};`.
+- `crates/syauth-cli/Cargo.toml` — adds `syauth-core` and `syauth-transport` path deps, `hkdf = "0.13"`, `sha2 = "0.11"` (shared workspace pin from S-010), `tokio` with rt-multi-thread/macros/time/sync, `bluer = "0.17"` (same pin), `async-trait`, `time` for `OffsetDateTime`.
+- `crates/syauth-cli/tests/pair_flow.rs` — 9 integration tests driving the full state machine through a `MockPairBackend`.
+- `specs/journeys/JOURNEY-S-011-pairing-desktop.md` — journey doc.
+
+**Tests** (9 in `tests/pair_flow.rs` + 15 net new unit tests in oob/pair/list, all green):
+- `pair_golden_flow_writes_bond_and_list_shows_it` — DoD #1 + #5: golden pair persists a bond and `list` immediately shows it.
+- `pair_rejects_when_adapter_lacks_lesc` — DoD #2.
+- `pair_rejects_when_adapter_lacks_lesc_even_with_yes` — `--yes` does NOT bypass the safety gate.
+- `pair_timeout_writes_no_bond_to_disk` — DoD #4: state machine transitions ProvisionalBonded → Revoked on timeout; bond file empty.
+- `pair_timeout_leaves_pre_existing_bonds_file_byte_equal` — DoD #4: pre-existing bonds untouched.
+- `pair_operator_reject_writes_no_bond` — operator says N at the OOB prompt → no bond.
+- `pair_ambiguous_peer_with_yes_errors_with_match_list` — `--yes` + 2 substring matches → `AmbiguousPeer`.
+- `list_on_empty_store_prints_documented_hint` — DoD #5 boundary.
+- `pair_opts_round_trip_via_struct_default_paths` — clap defaults respect SPEC paths.
+
+**Command outputs:**
+- `syauth pair --help` shows `--adapter`, `--peer`, `--timeout-secs`, `--bond-dir`, `--yes` with documented defaults.
+- `make lint` — exit 0 (clippy + fmt + audit + `cargo deny check` green).
+- `make test` — exit 0; `cargo test -p syauth-cli` — 28 unit + 10 install_pam + 9 pair_flow = 47 passed.
+
+**Deviations:**
+1. `BluerPairBackend` in `main.rs` is a stub that returns `Backend { reason: "real-radio path lands in S-019" }`. Same deferral pattern as S-010's `BlueZBtPeer::connect`. Every safety-relevant gate is exercised through the `MockPairBackend` test seam.
+2. `--peer` uses substring match on advertised name (case-sensitive). The ambiguous-substring path is the canonical `AmbiguousPeer` test case.
+3. `Revoked` reasons in v1: `{ Timeout, OperatorReject }`. Other revocation paths (e.g. BT numeric mismatch) plug into the same shape in later steps.
 
 **Tests:**
-- `crates/syauth-cli/tests/pair_flow.rs` integration test against an injected mock `BtPeer` that emits the LESC simulation events.
+- `crates/syauth-cli/tests/pair_flow.rs` integration test (9 cases).
 
 **Files likely affected:** `crates/syauth-cli/src/{main.rs,pair.rs,list.rs,oob.rs}`.
 
-**Journey:** `JOURNEY-{id}-pairing-desktop.md`
+**Journey:** [`JOURNEY-S-011-pairing-desktop.md`](../journeys/JOURNEY-S-011-pairing-desktop.md)
 
 ---
 

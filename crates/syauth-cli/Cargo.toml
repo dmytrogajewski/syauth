@@ -26,10 +26,39 @@ regex = "1"
 tempfile = "3"
 thiserror = "2"
 
+# Pairing flow deps (S-011).
+# `syauth-core` re-exports `Bond`, `BondStore`, `peer_id_from_pubkey` — the
+# bond persistence surface S-011 writes to on a successful pair.
+syauth-core = { path = "../syauth-core" }
+# `syauth-transport` re-exports `BlueZBtPeer`, `PairingState`, the
+# rotating-session-UUID derivation, and the `PairBackend` seam this crate's
+# `pair` module dispatches against in production.
+syauth-transport = { path = "../syauth-transport" }
+# HKDF-SHA256 for the app-level OOB code derivation. Pinned to the same major
+# the workspace already pulled in via `syauth-transport` (S-010) so we share a
+# single resolved version in Cargo.lock.
+hkdf = "0.13"
+sha2 = "0.11"
+# Tokio runtime for the async `PairBackend` trait surface. `time` enables the
+# `tokio::time::timeout` wrapper that drives the `--timeout-secs` gate.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Re-used at run-time by the production path; not required by the integration
+# test (the test injects a mock). Kept here so a future caller that wants to
+# build a real `bluer`-backed `PairBackend` does not have to add a duplicate
+# dep. Matches the pin chosen in S-010.
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] }
+async-trait = "0.1"
+# `time::OffsetDateTime` for the Bond.created_at field. Same pin as
+# `syauth-core` so the workspace resolves to a single version.
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# Full tokio feature set so `#[tokio::test]` and `tokio::time::pause` are
+# available in the pair_flow integration test.
+tokio = { version = "1", features = ["full"] }
 
 [lints]
 workspace = true
