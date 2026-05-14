@@ -131,19 +131,42 @@
 **DoR:** S-002 complete.
 
 **DoD:**
-- [ ] `syauth_core::ReplayCache::new(cap: usize, ttl: Duration)`.
-- [ ] `cache.observe(nonce: [u8; 16], now: Instant) -> Acceptance` with variants `Fresh` and `Replayed`.
-- [ ] Time is injected via a `now: Instant` parameter — no `Instant::now()` inside the cache, because deterministic time is required by tests.
-- [ ] LRU eviction is exercised by a test that inserts `cap + 1` entries and confirms the oldest is gone.
-- [ ] TTL expiration is exercised by a test that advances time past TTL and confirms the entry can be re-accepted.
-- [ ] All time deltas are `const` durations, not literals.
+- [x] `syauth_core::ReplayCache::new(cap: usize, ttl: Duration)`.
+- [x] `cache.observe(nonce: [u8; 16], now: Instant) -> Acceptance` with variants `Fresh` and `Replayed`.
+- [x] Time is injected via a `now: Instant` parameter — no `Instant::now()` inside the cache, because deterministic time is required by tests.
+- [x] LRU eviction is exercised by a test that inserts `cap + 1` entries and confirms the oldest is gone.
+- [x] TTL expiration is exercised by a test that advances time past TTL and confirms the entry can be re-accepted.
+- [x] All time deltas are `const` durations, not literals.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-core/src/replay.rs` — new `ReplayCache` + `Acceptance` enum, backing store `VecDeque<([u8; NONCE_LEN], Instant)>`, named consts `DEFAULT_REPLAY_CAP=64`, `DEFAULT_REPLAY_TTL=Duration::from_secs(10)`, `DEFAULT_REPLAY_TTL_NUDGE=1ms` (test-only). `observe` does TTL sweep → membership check → LRU push. No `Instant::now()` inside the cache; `now` is the only time source. 8 unit tests including degenerate-input hardening.
+- `crates/syauth-core/src/lib.rs` — adds `pub mod replay;` and re-exports `Acceptance`, `DEFAULT_REPLAY_CAP`, `DEFAULT_REPLAY_TTL`, `ReplayCache`.
+- `specs/journeys/JOURNEY-S-003-replay-defense.md` — journey doc.
+
+**Tests** (`crates/syauth-core/src/replay.rs::tests`, 8 cases):
+- `fresh_nonce_accepted` — first observation returns `Fresh`.
+- `exact_replay_rejected` — second observation inside TTL returns `Replayed`.
+- `lru_eviction_by_capacity` — `cap + 1` inserts evict the oldest; surviving entries still report `Replayed`; oldest re-observation reports `Fresh`.
+- `ttl_expiration_re_accepts` — same nonce past TTL returns `Fresh`.
+- `interleaved_fresh_and_replay` — A B A C B sequence verifies the LRU+TTL interaction.
+- `cap_zero_accepts_everything_as_fresh` — degenerate-input hardening.
+- `replay_does_not_refresh_inserted_at` — replays must not extend the deadline (otherwise a captured nonce could be kept alive forever by spamming replays).
+- `zero_ttl_expires_entries_instantly` — `Duration::ZERO` works.
+
+**Command outputs:**
+- `make lint` — exit 0; `make test` — exit 0.
+- `cargo test -p syauth-core --lib replay::` — 8 passed.
+
+**Deviations:** Three extra tests beyond the DoD-named five (`cap_zero`, `replay_does_not_refresh_inserted_at`, `zero_ttl`) harden the degenerate-input contract documented at the constructor. Additive.
 
 **Tests:**
-- `crates/syauth-core/src/replay.rs` `#[cfg(test)] mod tests`: fresh nonce accepted, exact replay rejected, LRU eviction by capacity, TTL expiration, interleaved fresh + replay.
+- `crates/syauth-core/src/replay.rs` `#[cfg(test)] mod tests` — 8 cases.
 
 **Files likely affected:** `crates/syauth-core/src/replay.rs`.
 
-**Journey:** `JOURNEY-{id}-replay-defense.md`
+**Journey:** [`JOURNEY-S-003-replay-defense.md`](../journeys/JOURNEY-S-003-replay-defense.md)
 
 ---
 
@@ -356,6 +379,7 @@
 ---
 
 ## Step S-010: `syauth-transport` — real BLE central via `bluer`
+<!-- status: in_progress claimed-at: 2026-05-14T22:48:19Z claimed-by: orchestrate -->
 
 **Description:** Implement `BlueZBtPeer` over `bluer`, advertising a rotating session UUID and acting as the GATT central that the phone connects to. Behind the same `BtPeer` trait — drop-in replacement for the mock.
 
