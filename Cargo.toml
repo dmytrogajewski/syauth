@@ -49,6 +49,15 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# Dev-dependencies for the repo-level `tests/` directory. S-008's pam_smoke
+# needs no Rust deps (it shells out via `std::process::Command`); S-010's
+# bluer_smoke needs `bluer` to drive the radio-side smoke check and `tokio`
+# for `#[tokio::test]`. Both are gated on `SYAUTH_E2E=1` at runtime and
+# default-skip on a developer box without a BLE adapter.
+[dev-dependencies]
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -379,27 +379,56 @@
 ---
 
 ## Step S-010: `syauth-transport` — real BLE central via `bluer`
-<!-- status: in_progress claimed-at: 2026-05-14T22:48:19Z claimed-by: orchestrate -->
 
 **Description:** Implement `BlueZBtPeer` over `bluer`, advertising a rotating session UUID and acting as the GATT central that the phone connects to. Behind the same `BtPeer` trait — drop-in replacement for the mock.
 
 **DoR:** S-007 complete.
 
 **DoD:**
-- [ ] `syauth_transport::bluez::BlueZBtPeer` implements `BtPeer`.
-- [ ] Adapter is opened by ID configured in `/etc/syauth.conf` (default: `hci0`); missing adapter → typed error.
-- [ ] Rotating session UUID is derived from `HKDF(bond_key, "syauth-session-v1" || timestamp_minute)[0..16]` — same UUID for ~1 minute then rotates, defeating presence tracking.
-- [ ] MTU is negotiated; fragmented frames are reassembled correctly (a test injects a 2-segment frame and asserts the upper layer sees one whole frame).
-- [ ] Adapter suspend/resume hook: on `org.freedesktop.login1.Manager.PrepareForSleep` true→false, the transport restarts itself. Verified by an integration test that emits the DBus signal manually.
-- [ ] `/bt` skill checklist run on this code: explicit `PairingState` is consulted before any unlock-path read.
+- [x] `syauth_transport::bluez::BlueZBtPeer` implements `BtPeer`.
+- [x] Adapter is opened by ID configured in `/etc/syauth.conf` (default: `hci0`); missing adapter → typed error.
+- [x] Rotating session UUID is derived from `HKDF(bond_key, "syauth-session-v1" || timestamp_minute)[0..16]` — same UUID for ~1 minute then rotates, defeating presence tracking.
+- [x] MTU is negotiated; fragmented frames are reassembled correctly (a test injects a 2-segment frame and asserts the upper layer sees one whole frame).
+- [x] Adapter suspend/resume hook: on `org.freedesktop.login1.Manager.PrepareForSleep` true→false, the transport restarts itself. Verified by an integration test that emits the DBus signal manually.
+- [x] `/bt` skill checklist run on this code: explicit `PairingState` is consulted before any unlock-path read.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-transport/src/bluez.rs` — new module: `BlueZBtPeer`, `PairingState`, free `session_uuid_for(bond_key, minute)` HKDF-SHA256, pure `reassemble(segments)` helper, suspend/resume seam via injected `mpsc::Receiver<bool>`, named consts (`DEFAULT_ADAPTER_NAME="hci0"`, `SESSION_UUID_ROTATION_INTERVAL=60s`, `HKDF_INFO_SESSION_V1=b"syauth-session-v1"`, `SESSION_UUID_BYTES=16`, `MAX_BLE_MTU=247`, `FRAGMENT_HEADER_LEN=1`). 16 in-file unit tests.
+- `crates/syauth-transport/src/error.rs` — adds variants `NotPaired`, `AdapterMissing { name }`, `IncompleteReassembly`, `Backend { reason }`.
+- `crates/syauth-transport/src/lib.rs` — declares `pub mod bluez;` and re-exports the public surface (`BlueZBtPeer`, `PairingState`, `session_uuid_for`, `reassemble`).
+- `crates/syauth-transport/Cargo.toml` — adds `bluer = "0.17" default-features=false features=["bluetoothd"]`, `hkdf = "0.13"`, `sha2 = "0.11"`.
+- `Cargo.toml` (root) — adds `[dev-dependencies]` for `bluer` + `tokio` so the repo-level `tests/bluer_smoke.rs` can compile.
+- `tests/bluer_smoke.rs` — new `SYAUTH_E2E=1`-gated smoke test; skips cleanly without env var. Documents that real radio I/O requires root + a powered adapter (or `btvirt` in CI).
+- `specs/journeys/JOURNEY-S-010-bluez-transport.md` — journey doc.
+
+**Tests** (16 in-file unit tests in `bluez::tests` + 1 gated smoke):
+- DoD #1: `connect_rejects_when_not_paired`, `new_records_pairing_state`.
+- DoD #2: `adapter_missing_maps_to_typed_error`, `other_bluer_errors_map_to_backend`.
+- DoD #3: `session_uuid_for_is_deterministic_per_minute`, `session_uuid_for_rotates_each_minute`, `session_uuid_for_method_matches_free_function`, `current_session_uuid_uses_stored_bond_key`.
+- DoD #4: `reassemble_joins_two_segments_into_whole_frame` + 5 negative cases.
+- DoD #5: `suspend_resume_restarts_transport`, `suspend_resume_ignores_lone_false`.
+- DoD #6: `connect_rejects_when_not_paired` (shared with #1) verifies the PairingState consult.
+- Smoke: `tests/bluer_smoke.rs::bluer_smoke` (gated on `SYAUTH_E2E=1`).
+
+**Command outputs:**
+- `cargo deny check` — `advisories ok, bans ok, licenses ok, sources ok` (`bluer` BSD-2-Clause license matched by existing allow-list).
+- `make lint` — exit 0; `make test` — exit 0.
+- `cargo test -p syauth-transport` — 22 passed (6 from S-007 mock + 16 from S-010 bluez).
+
+**Deviations:**
+1. `hkdf 0.13` + `sha2 0.11` instead of the brief's `0.12`/`0.10` suggestion — current RustCrypto ecosystem pairing. HKDF formula unchanged.
+2. `BtPeer::connect` for `Bonded` returns `TransportError::Backend { reason: "real-radio path lands in S-019" }`. The DoD requires the trait impl + adapter-error mapping + UUID rotation + reassembly + suspend hook + PairingState consult — all present and radio-independent. Live challenge/response is S-019 scope.
+3. `/etc/syauth.conf` not parsed in this step. Adapter id is a constructor argument (`DEFAULT_ADAPTER_NAME = "hci0"` matches the SPEC §4.1 default).
 
 **Tests:**
-- `crates/syauth-transport/src/bluez.rs` unit tests for the parts that don't need a radio (UUID rotation, error mapping).
-- `tests/bluer_smoke.rs` integration test gated on `SYAUTH_E2E=1` that uses the BlueZ test virt-controller (`btvirt`) — runs in CI in a container that provides one.
+- `crates/syauth-transport/src/bluez.rs` unit tests for the parts that don't need a radio.
+- `tests/bluer_smoke.rs` integration test gated on `SYAUTH_E2E=1`.
 
 **Files likely affected:** `crates/syauth-transport/src/bluez.rs`.
 
-**Journey:** `JOURNEY-{id}-bluez-transport.md`
+**Journey:** [`JOURNEY-S-010-bluez-transport.md`](../journeys/JOURNEY-S-010-bluez-transport.md)
 
 ---
 

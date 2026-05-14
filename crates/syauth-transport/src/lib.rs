@@ -1,7 +1,7 @@
 //! `syauth-transport` — the seam between the `syauth-core` protocol and the
 //! Bluetooth (or, in v0.2, LAN) layer that actually moves bytes.
 //!
-//! S-007 (this commit) ships:
+//! S-007 ships:
 //!
 //! - the async [`BtPeer`] / [`Session`] trait pair,
 //! - a typed [`TransportError`] enum,
@@ -9,22 +9,39 @@
 //!   PAM module (S-008/S-009) can be tested end-to-end before a single byte
 //!   of `bluer` code lands in S-010.
 //!
+//! S-010 (this commit) adds:
+//!
+//! - [`BlueZBtPeer`], the `bluer`-backed real BLE central, behind the same
+//!   trait,
+//! - the rotating session UUID derivation
+//!   ([`session_uuid_for`](bluez::session_uuid_for)),
+//! - the fragment reassembly primitive ([`reassemble`](bluez::reassemble)),
+//! - the [`PairingState`](bluez::PairingState) consult,
+//! - the [`run_suspend_resume_loop`](bluez::BlueZBtPeer::run_suspend_resume_loop)
+//!   hook fed by an injectable `tokio::sync::mpsc::Receiver<bool>`.
+//!
 //! The only types that cross the trait boundary are [`syauth_core::Frame`],
 //! [`std::time::Duration`], and [`TransportError`]. That is the contract that
-//! lets `BlueZBtPeer` arrive in S-010 as a drop-in replacement for
-//! [`MockBtPeer`] without touching any caller.
+//! lets `BlueZBtPeer` slot in as a drop-in replacement for [`MockBtPeer`]
+//! without touching any caller.
 //!
-//! See `specs/journeys/JOURNEY-S-007-transport-trait.md` for the design
-//! rationale and the SPEC §4.3 ↔ [`MockScenario`] mapping.
+//! See `specs/journeys/JOURNEY-S-007-transport-trait.md` for the trait
+//! design rationale and `specs/journeys/JOURNEY-S-010-bluez-transport.md`
+//! for the BlueZ design rationale.
 
 #![deny(missing_docs)]
 
+pub mod bluez;
 pub mod error;
 pub mod mock;
 
 use std::time::Duration;
 
 use async_trait::async_trait;
+pub use bluez::{
+    BOND_KEY_BYTES, BlueZBtPeer, DEFAULT_ADAPTER_NAME, FRAGMENT_HEADER_LEN, FRAGMENT_MORE_BIT, FRAGMENT_PAYLOAD_MAX, HKDF_INFO_SESSION_V1,
+    MAX_BLE_MTU, PairingState, SECONDS_PER_MINUTE, SESSION_UUID_BYTES, SESSION_UUID_ROTATION_INTERVAL, reassemble, session_uuid_for,
+};
 pub use error::TransportError;
 pub use mock::{
     GOLDEN_PAYLOAD_XOR_MASK, GOLDEN_RECV_TIMEOUT, GOLDEN_ROUNDTRIP_BUDGET, MOCK_CHAN_CAP, MOCK_SLOW_DELAY, MockBtPeer, MockScenario,

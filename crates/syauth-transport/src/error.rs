@@ -10,6 +10,10 @@
 //! - [`TransportError::BadFrame`]  ← framing rejected by `syauth-core`
 //! - [`TransportError::WrongVersion`] ← `bt.unlock.version_rejected`
 //! - [`TransportError::Replay`]    ← `bt.unlock.nonce_reused`
+//! - [`TransportError::NotPaired`] ← `bt.unlock.not_paired` (S-010, `/bt` Phase 2)
+//! - [`TransportError::AdapterMissing`] ← `bt.adapter.missing` (S-010 DoD #2)
+//! - [`TransportError::IncompleteReassembly`] ← `bt.frame.dropped` (S-010 DoD #4)
+//! - [`TransportError::Backend`] ← opaque upstream failure from `bluer`
 //!
 //! `BadFrame` carries the upstream [`syauth_core::FrameError`] verbatim so
 //! callers and tests can assert on the structural variant (`BadVersion`,
@@ -65,4 +69,39 @@ pub enum TransportError {
     /// them.
     #[error("replayed frame")]
     Replay,
+
+    /// The upper layer attempted an unlock-path operation against a peer
+    /// whose `PairingState` is not `Bonded`. Mandated by the `/bt` skill
+    /// Phase 2 rule: the unlock path NEVER reads from a non-`Bonded` peer.
+    /// `BlueZBtPeer::connect` (S-010) emits this variant before any `bluer`
+    /// call is made.
+    #[error("peer is not paired")]
+    NotPaired,
+
+    /// The adapter named in `/etc/syauth.conf` (default `hci0`) does not exist
+    /// on this host. Distinct from `Backend` because the operator's fix is
+    /// well-defined: name a real adapter (or plug one in). The name is
+    /// preserved so logs and CLI error messages can quote it.
+    #[error("bluetooth adapter '{name}' not found")]
+    AdapterMissing {
+        /// The adapter id the caller asked for, e.g. `"hci0"`.
+        name: String,
+    },
+
+    /// Fragment-reassembly produced an incomplete frame: either the segment
+    /// slice was empty, a segment was shorter than the fragment header, or
+    /// the final segment still had its `more-fragments` bit set. Maps to the
+    /// `bt.frame.dropped` log marker.
+    #[error("incomplete fragment reassembly")]
+    IncompleteReassembly,
+
+    /// Opaque upstream failure from `bluer` or `dbus` that does not fit any
+    /// other variant. The wrapped `reason` is the rendered upstream `Display`
+    /// — never the upstream type itself, so `bluer` and `dbus` do not leak
+    /// into this crate's public API.
+    #[error("transport backend error: {reason}")]
+    Backend {
+        /// Human-readable description of the upstream failure.
+        reason: String,
+    },
 }

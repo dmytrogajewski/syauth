@@ -38,6 +38,21 @@ thiserror = "2"
 # `#[tokio::test]` attribute compiles inside the mock's test module.
 tokio = { version = "1", features = ["sync", "macros", "time", "rt", "rt-multi-thread"] }
 
+# Official BlueZ Rust binding (S-010). `bluetoothd` is the feature that enables
+# the high-level DBus surface — adapter / device / GATT — which is exactly the
+# surface `BlueZBtPeer` consumes. Pinned to the `0.17` major; minor revs flow
+# via Cargo.lock. `default-features = false` keeps the closure small so the
+# `id` / `mesh` / `l2cap` / `rfcomm` / `serde` features (none of which we use
+# in v0.1) do not pull extra deps. See JOURNEY-S-010 §5 for rationale.
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] }
+
+# HKDF-SHA256 for the rotating session UUID derivation. The bond key is
+# already 32 high-entropy bytes, so HKDF salt = None is documented in
+# JOURNEY-S-010 §1. `hkdf` 0.13 / `sha2` 0.11 are the current
+# RustCrypto-ecosystem versions and pair together.
+hkdf = "0.13"
+sha2 = "0.11"
+
 [dev-dependencies]
 # Full feature set for tests so we can use `#[tokio::test(flavor = ...)]`,
 # `tokio::time::pause`, etc., should we ever need them.
