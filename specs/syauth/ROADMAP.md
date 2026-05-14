@@ -245,25 +245,48 @@
 ---
 
 ## Step S-007: `syauth-transport` — `BtPeer` trait + in-process mock
-<!-- status: in_progress claimed-at: 2026-05-14T22:17:56Z claimed-by: orchestrate -->
 
 **Description:** Define the trait that decouples the protocol from BlueZ. Ship the mock impl first so the PAM module can be tested end-to-end before any real radio code exists. This is the seam that lets `/pam` and `/bt` evolve independently.
 
 **DoR:** S-002 complete.
 
 **DoD:**
-- [ ] `syauth_transport::BtPeer` trait: `connect(timeout) -> Result<Session>`, `Session::send_frame(&Frame)`, `Session::recv_frame(timeout) -> Result<Frame>`.
-- [ ] All methods are async (`async-trait`) and return after `timeout` with `TransportError::Timeout`.
-- [ ] `MockBtPeer` impl backed by a `tokio::sync::mpsc` channel pair, configurable per test for: golden, offline (returns `Unreachable`), slow (delays beyond timeout), reordered, replay-injected, wrong-version-injected.
-- [ ] `MockBtPeer::expect(scenario: MockScenario)` builder; a test that uses `MockScenario::Golden` and asserts a clean roundtrip.
-- [ ] Zero dependency on `bluer` in this crate yet — that arrives in S-009.
+- [x] `syauth_transport::BtPeer` trait: `connect(timeout) -> Result<Session>`, `Session::send_frame(&Frame)`, `Session::recv_frame(timeout) -> Result<Frame>`.
+- [x] All methods are async (`async-trait`) and return after `timeout` with `TransportError::Timeout`.
+- [x] `MockBtPeer` impl backed by a `tokio::sync::mpsc` channel pair, configurable per test for: golden, offline (returns `Unreachable`), slow (delays beyond timeout), reordered, replay-injected, wrong-version-injected.
+- [x] `MockBtPeer::expect(scenario: MockScenario)` builder; a test that uses `MockScenario::Golden` and asserts a clean roundtrip.
+- [x] Zero dependency on `bluer` in this crate yet — that arrives in S-009.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-transport/src/lib.rs` — async `BtPeer` + `Session` traits (`#[async_trait]`), public re-exports of `MockBtPeer`, `MockScenario`, `TransportError`.
+- `crates/syauth-transport/src/error.rs` — `TransportError` enum with variants `Timeout`, `Unreachable`, `Closed`, `BadFrame(FrameError)`, `WrongVersion(u8)`, `Replay`. `BadFrame` wraps `syauth_core::FrameError` verbatim.
+- `crates/syauth-transport/src/mock.rs` — `MockBtPeer` and `MockScenario` (Golden/Offline/Slow{delay}/Reordered/Replay{duplicate_count}/WrongVersion{injected_version}); tokio mpsc-backed; named consts for default delay, replay duplicates, XOR mask, channel cap, golden-roundtrip budget.
+- `crates/syauth-transport/Cargo.toml` — adds `syauth-core` path dep, `async-trait`, `thiserror`, `tokio` (sync/macros/time/rt features).
+- `specs/journeys/JOURNEY-S-007-transport-trait.md` — journey doc.
+
+**Tests** (`crates/syauth-transport/src/mock.rs::tests`, 6 cases, one per scenario):
+- `golden_roundtrip_decodes_xor_echo_within_budget` — Golden: send a frame, receive XOR-echo, decode, complete within budget.
+- `offline_scenario_connect_returns_unreachable` — Offline: `connect()` returns `TransportError::Unreachable`.
+- `slow_scenario_recv_times_out_before_delay_elapses` — Slow: caller's `timeout` trips before the mock's `delay`.
+- `reordered_scenario_emits_second_frame_first` — Reordered: the first two sent frames come back in reverse order.
+- `replay_scenario_emits_duplicate_frame` — Replay: a sent frame is delivered `duplicate_count + 1` times.
+- `wrong_version_scenario_returns_bad_frame_with_injected_version` — WrongVersion: first byte mutated to `injected_version`; decode produces `FrameError::BadVersion` which wraps to `TransportError::BadFrame`.
+
+**Command outputs:**
+- `grep -rn "bluer" crates/syauth-transport/` → comment-only references (Cargo.toml header, doc strings naming the future S-010 impl); no source/dep hits.
+- `make lint` — exit 0; `make test` — exit 0.
+- `cargo test -p syauth-transport` — 6 passed.
+
+**Deviations:** None.
 
 **Tests:**
-- `crates/syauth-transport/src/mock.rs` test module: one test per scenario variant.
+- `crates/syauth-transport/src/mock.rs` `#[cfg(test)] mod tests` — one test per scenario variant (6 total).
 
 **Files likely affected:** `crates/syauth-transport/src/{lib.rs,mock.rs,error.rs}`.
 
-**Journey:** `JOURNEY-{id}-transport-trait.md`
+**Journey:** [`JOURNEY-S-007-transport-trait.md`](../journeys/JOURNEY-S-007-transport-trait.md)
 
 ---
 
