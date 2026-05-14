@@ -1,7 +1,7 @@
 # syauth-cli — the `syauth` binary (pair / list / revoke / status / install-pam).
 #
-# Roadmap items S-011..S-013. S-001 only stands up the placeholder so the
-# workspace resolves and `cargo build --workspace` exercises the binary path.
+# Roadmap items S-011..S-013. S-013 adds `install-pam` and `uninstall-pam`
+# subcommands with atomic edit + backup of a PAM service file.
 
 [package]
 name = "syauth-cli"
@@ -11,9 +11,25 @@ rust-version.workspace = true
 license.workspace = true
 description = "syauth command-line tool (pair, list, revoke, status, install-pam)"
 
+[lib]
+name = "syauth_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "syauth"
 path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+tempfile = "3"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
 
 [lints]
 workspace = true

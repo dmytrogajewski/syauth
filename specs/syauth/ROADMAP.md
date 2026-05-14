@@ -424,26 +424,56 @@
 ---
 
 ## Step S-013: `syauth-cli` — `install-pam` / `uninstall-pam` with atomic edit
-<!-- status: in_progress claimed-at: 2026-05-14T22:17:56Z claimed-by: orchestrate -->
 
 **Description:** Eliminates the worst foot-gun in syauth: hand-editing `/etc/pam.d/*`. The subcommand reads the existing service file, inserts a syauth line at the documented position, atomically rewrites the file (via `tempfile::persist`), and saves a `.bak` next to it. Uninstall reverses the operation by reading the bak.
 
 **DoR:** S-008 complete.
 
 **DoD:**
-- [ ] `syauth install-pam --service sudo` is idempotent: running it twice produces the same file.
-- [ ] The inserted line is `auth required pam_syauth.so timeout=1200` by default, configurable via `--module-args`.
-- [ ] A `.bak` is always written if not already present. Refuses to overwrite an existing `.bak`.
-- [ ] `syauth uninstall-pam --service sudo` restores from `.bak` and removes the bak file on success.
-- [ ] If the target file does not contain a recognizable syauth line, uninstall is a no-op (exit 0 with a warning) — never deletes a backup it doesn't own.
-- [ ] Hermetic test: takes a fixture `/etc/pam.d/sudo`, runs install, asserts diff; runs uninstall, asserts byte-equality with the original.
+- [x] `syauth install-pam --service sudo` is idempotent: running it twice produces the same file.
+- [x] The inserted line is `auth required pam_syauth.so timeout=1200` by default, configurable via `--module-args`.
+- [x] A `.bak` is always written if not already present. Refuses to overwrite an existing `.bak`.
+- [x] `syauth uninstall-pam --service sudo` restores from `.bak` and removes the bak file on success.
+- [x] If the target file does not contain a recognizable syauth line, uninstall is a no-op (exit 0 with a warning) — never deletes a backup it doesn't own.
+- [x] Hermetic test: takes a fixture `/etc/pam.d/sudo`, runs install, asserts diff; runs uninstall, asserts byte-equality with the original.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-cli/Cargo.toml` — adds `clap` (derive), `anyhow`, `thiserror`, `tempfile`, `regex`; dev-deps `assert_cmd`, `predicates`. Declares `[lib]` so the integration test can drive the library directly.
+- `crates/syauth-cli/src/lib.rs` — library entry point re-exporting `install_pam` and `uninstall_pam` modules.
+- `crates/syauth-cli/src/install_pam.rs` — `install` function with idempotency check (regex `(?m)^\s*auth\s+\S+\s+pam_syauth\.so\b`), atomic write via `tempfile::NamedTempFile::new_in(parent)` + `persist`, mode-preserving rewrite, refuses to clobber existing `.bak`. Named consts (`BACKUP_SUFFIX = ".bak"`, default module args, etc.).
+- `crates/syauth-cli/src/uninstall_pam.rs` — restores from `.bak` atomically and removes the bak on success; no-ops with warning when no syauth line is present (never touches a bak it doesn't own); refuses when the file references syauth but no `.bak` is on disk.
+- `crates/syauth-cli/src/main.rs` — clap-based dispatcher to `install_pam` / `uninstall_pam`.
+- `crates/syauth-cli/tests/install_pam.rs` — 10 hermetic integration tests using `assert_cmd` + tempdirs (no /etc/pam.d writes).
+- `specs/journeys/JOURNEY-S-013-pam-install-helper.md` — journey doc.
+
+**Tests** (integration `crates/syauth-cli/tests/install_pam.rs`, 10 cases; plus 13 library unit tests):
+- `tc01_install_inserts_canonical_line_at_top_of_auth_block` — DoD-line text + position.
+- `tc02_install_is_idempotent` — second install byte-identical to first.
+- `tc03_install_refuses_to_overwrite_existing_bak` — DoD .bak guard.
+- `tc04_uninstall_restores_byte_equality_from_bak` — DoD hermetic test.
+- `tc05_uninstall_is_noop_when_no_syauth_line_present` — DoD warn-and-exit-0.
+- `tc06_uninstall_refuses_when_bak_missing_but_line_present` — actionable refusal.
+- `tc07_install_preserves_file_mode` — `PermissionsExt` asserts post-persist mode equals pre.
+- `tc08_install_honors_module_args` — `--module-args foo=bar` produces matching line.
+- `tc09_install_honors_so_path` — `--so-path` substitution.
+- `tc10_help_invocations_succeed` — `--help` / `--version` exit 0.
+
+**Command outputs:**
+- `cargo test -p syauth-cli --test install_pam` — 10 passed; `cargo test -p syauth-cli --lib` — 13 passed.
+- `make lint` — exit 0; `make test` — exit 0.
+
+**Deviations:**
+1. Recognition regex uses `(?m)^\s*auth\s+\S+\s+pam_syauth\.so\b`. Without multiline mode the original anchor would only match at byte 0 and silently miss every real pam.d file (they begin with `#%PAM-1.0\n`). Same semantic intent, working in practice.
+2. `--so-path` recognition asymmetry: if an operator installs with a custom `--so-path`, uninstall with the default name treats the file as not-syauth and no-ops. Intentional — the regex anchors on `pam_syauth.so` exactly to avoid false-positives on look-alike modules.
 
 **Tests:**
-- `crates/syauth-cli/tests/install_pam.rs`.
+- `crates/syauth-cli/tests/install_pam.rs` — 10 integration cases.
 
 **Files likely affected:** `crates/syauth-cli/src/{install_pam.rs,uninstall_pam.rs}`.
 
-**Journey:** `JOURNEY-{id}-pam-install-helper.md`
+**Journey:** [`JOURNEY-S-013-pam-install-helper.md`](../journeys/JOURNEY-S-013-pam-install-helper.md)
 
 ---
 
