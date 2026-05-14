@@ -1,7 +1,9 @@
 # syauth-core — protocol framing, replay cache, crypto primitives, bond store.
 #
-# Roadmap items S-002..S-006 fill this crate. S-001 only stands up the
-# placeholder so the workspace resolves.
+# Roadmap items S-002..S-006 fill this crate. S-002 adds the v1 wire-format
+# `Frame` type plus its typed `FrameError` and the `proptest` round-trip
+# harness. No crypto deps land here yet — the tag is a placeholder
+# `[u8; TAG_LEN]` until S-004.
 
 [package]
 name = "syauth-core"
@@ -16,3 +18,13 @@ path = "src/lib.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+# Typed errors with Display impls. Vendored in `prrr` already; no new audit
+# surface for the workspace.
+thiserror = "2"
+
+[dev-dependencies]
+# Property-based round-trip testing for `Frame::encode`/`Frame::decode`.
+# Used only under `#[cfg(test)]`.
+proptest = "1"

@@ -87,21 +87,40 @@
 - S-001 complete.
 
 **DoD:**
-- [ ] `syauth_core::Frame` with `encode(&self, buf: &mut Vec<u8>)` and `decode(input: &[u8]) -> Result<Frame, FrameError>`.
-- [ ] `FrameError` is a typed enum: `TooShort { needed, got }`, `BadVersion(u8)`, `BadLength`.
-- [ ] All length and offset literals expressed as named `const`s (per AGENTS.md TDD rules).
-- [ ] Frames with `ver != 1` are rejected explicitly (do not silently upgrade).
-- [ ] Round-trip property test with `proptest`: `decode(encode(f)) == f` for any well-formed `Frame`.
-- [ ] `cargo fuzz` target `frame_parse` builds and runs 10 000 iterations without finding a panic.
-- [ ] `make lint` clean, ≥95% line coverage on `syauth-core/src/frame.rs` (measured with `cargo tarpaulin`).
+- [x] `syauth_core::Frame` with `encode(&self, buf: &mut Vec<u8>)` and `decode(input: &[u8]) -> Result<Frame, FrameError>`.
+- [x] `FrameError` is a typed enum: `TooShort { needed, got }`, `BadVersion(u8)`, `BadLength`.
+- [x] All length and offset literals expressed as named `const`s (per AGENTS.md TDD rules).
+- [x] Frames with `ver != 1` are rejected explicitly (do not silently upgrade).
+- [x] Round-trip property test with `proptest`: `decode(encode(f)) == f` for any well-formed `Frame`.
+- [x] `cargo fuzz` target `frame_parse` builds and runs 10 000 iterations without finding a panic.
+- [x] `make lint` clean, ≥95% line coverage on `syauth-core/src/frame.rs` (measured with `cargo tarpaulin`).
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-core/Cargo.toml` — adds `thiserror` (prod) and `proptest` (dev) deps.
+- `crates/syauth-core/src/lib.rs` — replaces the S-001 placeholder; declares the `frame` module and re-exports the public surface.
+- `crates/syauth-core/src/frame.rs` — `Frame`, `FrameError`, all length/offset `const`s, `encode`, `decode`, and the `#[cfg(test)] mod tests` block (15 unit + 3 proptest cases).
+- `crates/syauth-core/fuzz/Cargo.toml` — stand-alone (workspace-excluded) `cargo-fuzz` harness manifest.
+- `crates/syauth-core/fuzz/fuzz_targets/frame_parse.rs` — libFuzzer target asserting `Frame::decode` never panics.
+- `Cargo.toml` (workspace root) — adds `exclude = ["crates/syauth-core/fuzz"]` so the fuzz harness does not pollute the regular workspace build.
+- `specs/journeys/JOURNEY-S-002-protocol-framing.md` — journey doc.
+
+**Command outputs:**
+- `cargo test -p syauth-core` — 15 unit + 3 proptest cases, all passed.
+- `cargo fuzz run frame_parse -- -runs=10000` — `Done 10000 runs in 0 second(s)`, 0 crashes, 0 leaks.
+- `cargo tarpaulin --packages syauth-core` — `100.00% coverage, 28/28 lines covered` on `frame.rs`.
+- `make lint` — exit 0; `make test` — exit 0.
+
+**Deviations:** None. `MAX_PAYLOAD_LEN = 4096` is a step-local heap bound documented at the const and in the journey doc.
 
 **Tests:**
-- `crates/syauth-core/src/frame.rs` `#[cfg(test)] mod tests` — at minimum: golden encode, round-trip, too-short, wrong-version, oversized.
-- `fuzz/fuzz_targets/frame_parse.rs`.
+- `crates/syauth-core/src/frame.rs` `#[cfg(test)] mod tests`.
+- `crates/syauth-core/fuzz/fuzz_targets/frame_parse.rs`.
 
 **Files likely affected:** `crates/syauth-core/src/{lib.rs,frame.rs}`, `crates/syauth-core/Cargo.toml`, `fuzz/`.
 
-**Journey:** `JOURNEY-{id}-protocol-framing.md`
+**Journey:** [`JOURNEY-S-002-protocol-framing.md`](../journeys/JOURNEY-S-002-protocol-framing.md)
 
 ---
 

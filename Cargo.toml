@@ -14,6 +14,10 @@ members = [
     "crates/syauth-cli",
     "crates/syauth-mobile",
 ]
+# The `crates/syauth-core/fuzz` crate is a stand-alone libFuzzer harness; it is
+# only buildable on nightly with `cargo fuzz` instrumentation and is therefore
+# kept out of the regular workspace build.
+exclude = ["crates/syauth-core/fuzz"]
 resolver = "2"
 
 [workspace.package]

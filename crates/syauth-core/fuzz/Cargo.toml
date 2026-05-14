@@ -1,0 +1,30 @@
+# syauth-core fuzz harness.
+#
+# Roadmap item S-002 — `cargo fuzz` target `frame_parse`. Excluded from the
+# top-level workspace so the libFuzzer-instrumented build does not pull
+# nightly-only compiler flags into the regular `cargo build --workspace`.
+
+[package]
+name = "syauth-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.syauth-core]
+path = ".."
+
+[[bin]]
+name = "frame_parse"
+path = "fuzz_targets/frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+# Stand-alone — see top-level Cargo.toml `[workspace] exclude` entry.
