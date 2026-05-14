@@ -23,6 +23,16 @@ workspace = true
 # Typed errors with Display impls. Vendored in `prrr` already; no new audit
 # surface for the workspace.
 thiserror = "2"
+# S-005 bond store: Serde derive for the on-disk schema struct.
+serde = { version = "1", features = ["derive"] }
+# S-005 bond store: TOML codec for `/var/lib/syauth/bonds.toml`.
+toml = "0.8"
+# S-005 bond store: same-filesystem atomic rename via `NamedTempFile::persist`.
+tempfile = "3"
+# S-005 bond store: BLAKE3 hash producing the stable peer-id.
+blake3 = "1"
+# S-005 bond store: RFC3339 timestamps in `created_at`.
+time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
 
 [dev-dependencies]
 # Property-based round-trip testing for `Frame::encode`/`Frame::decode`.

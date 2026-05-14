@@ -180,18 +180,43 @@
 **DoR:** S-001 complete.
 
 **DoD:**
-- [ ] `syauth_core::bond::Bond` and `BondStore` with `load(path)`, `add(bond)`, `remove(peer_id)`, `mark_revoked(peer_id, reason)`, `list() -> &[Bond]`.
-- [ ] On `save`, write is atomic via `tempfile::NamedTempFile::persist`. Verified by a test that injects a fault between `write` and `persist` and confirms the original file is unchanged.
-- [ ] File mode is `0o600`, parent directory is `0o700`, both verified by an integration test using `std::os::unix::fs::PermissionsExt`.
-- [ ] Schema includes `schema_version: u32`; reading a future version returns a typed error, not a panic.
-- [ ] `Bond::peer_id` is the BLAKE3 hash of the peer pubkey (16 bytes hex) — stable across reboots, no UUID.
+- [x] `syauth_core::bond::Bond` and `BondStore` with `load(path)`, `add(bond)`, `remove(peer_id)`, `mark_revoked(peer_id, reason)`, `list() -> &[Bond]`.
+- [x] On `save`, write is atomic via `tempfile::NamedTempFile::persist`. Verified by a test that injects a fault between `write` and `persist` and confirms the original file is unchanged.
+- [x] File mode is `0o600`, parent directory is `0o700`, both verified by an integration test using `std::os::unix::fs::PermissionsExt`.
+- [x] Schema includes `schema_version: u32`; reading a future version returns a typed error, not a panic.
+- [x] `Bond::peer_id` is the BLAKE3 hash of the peer pubkey (16 bytes hex) — stable across reboots, no UUID.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-core/src/bond.rs` — new module: `Bond`, `BondStatus`, `BondStore`, `BondError`, free `peer_id_from_pubkey`, named consts (`BOND_FILE_MODE=0o600`, `BOND_DIR_MODE=0o700`, `PEER_ID_BLAKE3_BYTES=16`, etc.), Serde TOML codec, atomic `save` via `tempfile::NamedTempFile::persist` with parent-dir-create-with-0o700 + reject-too-permissive guard, and an 18-test `#[cfg(test)] mod tests` block.
+- `crates/syauth-core/src/lib.rs` — declares `pub mod bond;` and re-exports `Bond`, `BondError`, `BondStatus`, `BondStore`, `peer_id_from_pubkey`, plus the public consts.
+- `crates/syauth-core/Cargo.toml` — adds `serde`, `toml`, `tempfile`, `blake3`, `time` deps.
+- `specs/journeys/JOURNEY-S-005-bond-store.md` — journey doc.
+
+**Tests** (`crates/syauth-core/src/bond.rs::tests`, 18 cases):
+- Peer-id: `peer_id_is_stable_and_blake3_derived` / `peer_id_differs_for_different_pubkeys`.
+- Roundtrip: `add_save_load_roundtrip` / `rfc3339_round_trip_preserves_created_at`.
+- Add: `add_rejects_duplicate_peer_id`.
+- Revoke: `revoke_is_persisted_across_save_load` / `revoke_unknown_peer_errors` / `revoke_of_already_revoked_is_no_op`.
+- Remove: `remove_unknown_peer_errors` / `remove_existing_peer_succeeds`.
+- Atomic write: `atomic_write_fault_leaves_file_intact` (drops `NamedTempFile` without `persist`; asserts destination byte-equal to pre-fault snapshot, no stray `.tmp*`).
+- Permissions (`#[cfg(unix)]`): `saved_file_mode_is_0o600` / `parent_directory_mode_is_0o700_after_save` / `save_rejects_too_permissive_parent_dir`.
+- Schema: `future_schema_version_returns_typed_error` / `parse_error_on_garbage_toml` / `peer_id_mismatch_in_file_is_rejected`.
+- Empty: `load_missing_file_returns_empty_store`.
+
+**Command outputs:**
+- `make lint` — exit 0; `make test` — exit 0.
+- `cargo test -p syauth-core --lib` — 33 passed (18 bond + 15 frame).
+
+**Deviations:** Permission test lives in the in-file `mod tests` rather than a separate integration file — matches the roadmap "Tests" line that names `crates/syauth-core/src/bond.rs` as the home. Extra error variants (`Parse`, `Serialize`, `ParentDirTooPermissive`, `PeerIdMismatch`) are additive and needed to keep all function signatures total without `unwrap()`.
 
 **Tests:**
-- `crates/syauth-core/src/bond.rs` test module: add → save → load roundtrip; revoke is persisted; atomic-write fault test; permission test.
+- `crates/syauth-core/src/bond.rs` `#[cfg(test)] mod tests` — 18 cases.
 
 **Files likely affected:** `crates/syauth-core/src/bond.rs`.
 
-**Journey:** `JOURNEY-{id}-bond-store.md`
+**Journey:** [`JOURNEY-S-005-bond-store.md`](../journeys/JOURNEY-S-005-bond-store.md)
 
 ---
 
@@ -220,6 +245,7 @@
 ---
 
 ## Step S-007: `syauth-transport` — `BtPeer` trait + in-process mock
+<!-- status: in_progress claimed-at: 2026-05-14T22:17:56Z claimed-by: orchestrate -->
 
 **Description:** Define the trait that decouples the protocol from BlueZ. Ship the mock impl first so the PAM module can be tested end-to-end before any real radio code exists. This is the seam that lets `/pam` and `/bt` evolve independently.
 
@@ -375,6 +401,7 @@
 ---
 
 ## Step S-013: `syauth-cli` — `install-pam` / `uninstall-pam` with atomic edit
+<!-- status: in_progress claimed-at: 2026-05-14T22:17:56Z claimed-by: orchestrate -->
 
 **Description:** Eliminates the worst foot-gun in syauth: hand-editing `/etc/pam.d/*`. The subcommand reads the existing service file, inserts a syauth line at the documented position, atomically rewrites the file (via `tempfile::persist`), and saves a `.bak` next to it. Uninstall reverses the operation by reading the bak.
 
