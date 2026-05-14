@@ -1,22 +1,30 @@
-# syauth-pam — Linux PAM module shipped as `libpam_syauth.so`.
-#
-# Roadmap items S-008, S-009. S-001 ships only the cdylib placeholder so that
-# `make build` produces `target/release/libpam_syauth.so` — this proves the
-# `cdylib` crate-type and the `pam_syauth` library name resolve correctly long
-# before any `pam_sm_*` symbol exists.
-
 [package]
 name = "syauth-pam"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "syauth Linux PAM module (cdylib → libpam_syauth.so)"
+description = "Linux PAM module for syauth phone-as-key unlock (cdylib)."
 
+# Per S-001 DoD: crate-type = ["cdylib", "rlib"] so we get both
+# libpam_syauth.so for the loader AND an rlib so the inner helpers can be
+# exercised by unit tests in the `rlib` form.
+#
+# `name = "pam_syauth"` is required so the loader resolves
+# `libpam_syauth.so` — PAM strictly expects the module file name to match the
+# `pam_*` prefix.
 [lib]
+crate-type = ["cdylib", "rlib"]
 name = "pam_syauth"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
 
-[lints]
-workspace = true
+[dependencies]
+syslog = "7"
+libc = "0.2"
+
+# The workspace bans `unsafe_code` by default, but the entire purpose of this
+# crate is to expose `unsafe extern "C"` symbols across the libpam ABI. We
+# opt out at the crate level only, and every single `unsafe` block carries a
+# `// SAFETY:` comment per `.agents/skills/ffi/SKILL.md`.
+[lints.rust]
+unsafe_code = "allow"

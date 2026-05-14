@@ -1,0 +1,13 @@
+# PAM service fixture for the syauth e2e smoke test.
+#
+# DO NOT INSTALL TO /etc/pam.d. The `tests/pam_smoke.rs` harness OVERWRITES
+# the `auth required` line below at runtime so the path to libpam_syauth.so
+# is the absolute path resolved from `CARGO_MANIFEST_DIR`. The placeholder
+# tag `__SYAUTH_SO_PATH__` below is what the harness substitutes.
+#
+# When pamtester drives this file with `--confdir <repo>/tests/pam.d
+# syauth-test`, the loader resolves the absolute `.so` from this file alone.
+#
+# Journey: specs/journeys/JOURNEY-S-008-pam-skeleton.md
+auth     required    __SYAUTH_SO_PATH__
+account  required    __SYAUTH_SO_PATH__

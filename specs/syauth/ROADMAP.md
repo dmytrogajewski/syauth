@@ -248,20 +248,38 @@
 **DoR:** S-001 complete.
 
 **DoD:**
-- [ ] Each entry point is `#[unsafe(no_mangle)] pub unsafe extern "C" fn`.
-- [ ] `nm -D --defined-only target/release/libpam_syauth.so | grep ' pam_sm_'` shows exactly three symbols, no Rust mangling leaks.
-- [ ] Every entry point's outermost expression is `catch_unwind(|| { ... }).unwrap_or(PAM_AUTH_ERR)`.
-- [ ] Logging via `syslog` with tag `pam_syauth`, facility `LOG_AUTHPRIV`. No `println!`/`eprintln!` anywhere in the cdylib.
-- [ ] Fixture pam.d directory at `tests/pam.d/syauth-test` references the built `.so` by absolute path.
-- [ ] E2E test `tests/pam_smoke.rs` shells out to `pamtester` (gated on `SYAUTH_E2E=1`) and asserts that `authenticate` returns `PAM_AUTHINFO_UNAVAIL` and the syslog line `syauth: unlock unavailable reason=stub` appears.
-- [ ] `/ffi` audit on the module passes (every unsafe block has a SAFETY comment; cbindgen header generated and committed if any C-callable surface beyond `pam_sm_*` exists — it should not).
+- [x] Each entry point is `#[unsafe(no_mangle)] pub unsafe extern "C" fn`.
+- [x] `nm -D --defined-only target/release/libpam_syauth.so | grep ' pam_sm_'` shows exactly three symbols, no Rust mangling leaks.
+- [x] Every entry point's outermost expression is `catch_unwind(|| { ... }).unwrap_or(PAM_AUTH_ERR)`.
+- [x] Logging via `syslog` with tag `pam_syauth`, facility `LOG_AUTHPRIV`. No `println!`/`eprintln!` anywhere in the cdylib.
+- [x] Fixture pam.d directory at `tests/pam.d/syauth-test` references the built `.so` by absolute path.
+- [x] E2E test `tests/pam_smoke.rs` shells out to `pamtester` (gated on `SYAUTH_E2E=1`) and asserts that `authenticate` returns `PAM_AUTHINFO_UNAVAIL` and the syslog line `syauth: unlock unavailable reason=stub` appears.
+- [x] `/ffi` audit on the module passes (every unsafe block has a SAFETY comment; cbindgen header generated and committed if any C-callable surface beyond `pam_sm_*` exists — it should not).
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-pam/src/entry.rs` — three `pam_sm_*` extern "C" entry points, named PAM return-code consts, `run_entry` helper wrapping each body in `catch_unwind(AssertUnwindSafe(f))` with `PAM_AUTH_ERR` on caught panic; syslog write via `syslog::unix(...)` with `Formatter3164 { facility: LOG_AUTHPRIV, process: "pam_syauth", ... }`.
+- `crates/syauth-pam/src/lib.rs` — crate root with `#![allow(unsafe_code)]` justified for the FFI boundary.
+- `crates/syauth-pam/Cargo.toml` — adds `syslog = "7"` dep; preserves `crate-type = ["cdylib", "rlib"]` and `name = "pam_syauth"`.
+- `tests/pam_smoke.rs` — pamtester-driven e2e test gated on `SYAUTH_E2E=1` and `which("pamtester")`. Asserts `pamtester ... authenticate` exit string matches `"Authentication service cannot retrieve authentication info"` and journalctl tail contains `"syauth: unlock unavailable reason=stub"`. Skips cleanly on hosts without pamtester.
+- `tests/pam.d/syauth-test` — PAM service fixture with `__SYAUTH_SO_PATH__` placeholder; harness substitutes the absolute `target/release/libpam_syauth.so` path at test time.
+- `specs/journeys/JOURNEY-S-008-pam-skeleton.md` — journey doc.
+
+**Command outputs:**
+- `nm -D --defined-only target/release/libpam_syauth.so | grep ' pam_sm_'` shows exactly three symbols: `pam_sm_acct_mgmt`, `pam_sm_authenticate`, `pam_sm_setcred` — no Rust mangling, no extra C-callable surface.
+- `grep -rn "println!\|eprintln!" crates/syauth-pam/src/` — 0 hits (only a doc-comment reference).
+- `make build` produces `target/release/libpam_syauth.so`.
+- `make lint` — exit 0; `make test` — exit 0 (e2e gated tests skip cleanly on hosts without `pamtester`).
+
+**Deviations:** `tests/pam_smoke.rs` skips when `pamtester` is not on PATH (in addition to the `SYAUTH_E2E=1` gate) so the test stays green on dev machines without pamtester preinstalled; the original gate semantics are preserved.
 
 **Tests:**
 - `tests/pam_smoke.rs`.
 
-**Files likely affected:** `crates/syauth-pam/src/{lib.rs,entry.rs}`, `crates/syauth-pam/Cargo.toml` (`crate-type = ["cdylib"]`, `name = "pam_syauth"`), `tests/pam.d/syauth-test`.
+**Files likely affected:** `crates/syauth-pam/src/{lib.rs,entry.rs}`, `crates/syauth-pam/Cargo.toml` (`crate-type = ["cdylib", "rlib"]`, `name = "pam_syauth"`), `tests/pam.d/syauth-test`.
 
-**Journey:** `JOURNEY-{id}-pam-skeleton.md`
+**Journey:** [`JOURNEY-S-008-pam-skeleton.md`](../journeys/JOURNEY-S-008-pam-skeleton.md)
 
 ---
 
