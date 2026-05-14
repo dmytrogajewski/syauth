@@ -142,6 +142,27 @@ impl Frame {
         Ok(())
     }
 
+    /// Return the bytes that are signed (S-004 `sign::sign_frame`) and
+    /// MAC'd (S-004 `mac::compute_tag`): exactly
+    /// `[version:1] || [nonce:16] || [payload:N]`.
+    ///
+    /// This is the wire-format encoding minus the trailing
+    /// [`TAG_LEN`]-byte tag suffix. Both crypto sites share this view so
+    /// the "what is signed" / "what is tagged" contract is single-source.
+    ///
+    /// Returns `Err(FrameError::BadLength)` if the payload would push the
+    /// body past the spec-permitted [`MAX_PAYLOAD_LEN`].
+    pub fn body_bytes(&self) -> Result<Vec<u8>, FrameError> {
+        if self.payload.len() > MAX_PAYLOAD_LEN {
+            return Err(FrameError::BadLength);
+        }
+        let mut buf = Vec::with_capacity(HEADER_LEN + self.payload.len());
+        buf.push(self.version);
+        buf.extend_from_slice(&self.nonce);
+        buf.extend_from_slice(&self.payload);
+        Ok(buf)
+    }
+
     /// Parse a wire-format frame from `input`.
     ///
     /// Returns a [`FrameError`] describing the first failure observed:
@@ -312,6 +333,42 @@ mod tests {
         frame.encode(&mut buf).expect("encode max");
         let parsed = Frame::decode(&buf).expect("decode max");
         assert_eq!(parsed, frame);
+    }
+
+    #[test]
+    fn body_bytes_emits_version_nonce_payload_only() {
+        let frame = Frame {
+            version: SYAUTH_WIRE_VERSION_V1,
+            nonce: [0x55; NONCE_LEN],
+            payload: vec![0x77; 5],
+            tag: [0xAB; TAG_LEN],
+        };
+        let body = frame.body_bytes().expect("body_bytes");
+        assert_eq!(body.len(), HEADER_LEN + 5);
+        assert_eq!(body[VERSION_OFFSET], SYAUTH_WIRE_VERSION_V1);
+        assert_eq!(&body[NONCE_OFFSET..NONCE_OFFSET + NONCE_LEN], &[0x55; NONCE_LEN]);
+        assert_eq!(&body[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 5], &[0x77; 5]);
+    }
+
+    #[test]
+    fn body_bytes_matches_encoded_frame_without_tag_suffix() {
+        let frame = Frame {
+            version: SYAUTH_WIRE_VERSION_V1,
+            nonce: [0x33; NONCE_LEN],
+            payload: vec![0x44; 17],
+            tag: [0x99; TAG_LEN],
+        };
+        let body = frame.body_bytes().expect("body_bytes");
+        let mut full = Vec::new();
+        frame.encode(&mut full).expect("encode");
+        assert_eq!(&full[..full.len() - TAG_LEN], body.as_slice());
+    }
+
+    #[test]
+    fn body_bytes_rejects_oversized_payload() {
+        let frame = frame_with_payload(MAX_PAYLOAD_LEN + 1);
+        let err = frame.body_bytes().expect_err("oversize");
+        assert_eq!(err, FrameError::BadLength);
     }
 
     #[test]

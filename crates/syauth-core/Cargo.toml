@@ -2,8 +2,10 @@
 #
 # Roadmap items S-002..S-006 fill this crate. S-002 adds the v1 wire-format
 # `Frame` type plus its typed `FrameError` and the `proptest` round-trip
-# harness. No crypto deps land here yet — the tag is a placeholder
-# `[u8; TAG_LEN]` until S-004.
+# harness. S-004 (this commit) adds the Ed25519 signing layer
+# (`sign::sign_frame` / `sign::verify_frame`) and the BLAKE3-keyed-hash MAC
+# (`mac::compute_tag` / `mac::verify_tag` with constant-time compare via
+# `subtle::ConstantTimeEq`).
 
 [package]
 name = "syauth-core"
@@ -33,8 +35,20 @@ tempfile = "3"
 blake3 = "1"
 # S-005 bond store: RFC3339 timestamps in `created_at`.
 time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
+# S-004 signing: Ed25519 signatures over `version || nonce || challenge`.
+# `verify_strict` rejects malleable signatures (RFC 8032 §8.4 cofactored
+# verification ambiguity). v2.x is the current RustCrypto release line.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# S-004 MAC: constant-time byte-slice equality via `ConstantTimeEq`.
+# Defends T-010 (timing side channels) per SPEC §6.
+subtle = { version = "2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Property-based round-trip testing for `Frame::encode`/`Frame::decode`.
 # Used only under `#[cfg(test)]`.
 proptest = "1"
+# S-004 KAT loader: parse `testdata/kat.json` in `tests/kat.rs` and the
+# in-file `#[cfg(test)]` bootstrap helper.
+serde_json = "1"
+# S-004 KAT loader: lowercase hex decode for vector fields.
+hex = "0.4"
