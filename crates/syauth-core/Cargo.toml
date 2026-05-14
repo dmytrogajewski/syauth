@@ -1,0 +1,18 @@
+# syauth-core — protocol framing, replay cache, crypto primitives, bond store.
+#
+# Roadmap items S-002..S-006 fill this crate. S-001 only stands up the
+# placeholder so the workspace resolves.
+
+[package]
+name = "syauth-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth shared protocol core (framing, replay cache, crypto, bond store)"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

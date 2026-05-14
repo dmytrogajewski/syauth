@@ -9,67 +9,84 @@ GIT_COMMIT = $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 
 all: build
 
-# Build all binaries
+# Build the whole workspace (release). Produces:
+#   - target/release/libpam_syauth.so (cdylib from crates/syauth-pam)
+#   - target/release/syauth           (binary from crates/syauth-cli)
 .PHONY: build
 build:
-	$(CARGO) build --profile $(PROFILE) --bin syauth
+	$(CARGO) build --profile $(PROFILE) --workspace
 
 # Show help
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  build            - Build all binaries (release)"
-	@echo "  install          - Install binaries to ~/.cargo/bin"
-	@echo "  test             - Run all tests"
+	@echo "  build            - Build the whole workspace (release)"
+	@echo "  install          - Install the syauth binary to ~/.cargo/bin"
+	@echo "  test             - Run all tests (workspace)"
 	@echo "  testv            - Run all tests (verbose)"
-	@echo "  lint             - Run clippy, fmt check, and audit"
+	@echo "  lint             - Run clippy, fmt check, audit, deny"
 	@echo "  fmt              - Format code"
-	@echo "  audit            - Run cargo audit"
+	@echo "  audit            - Run cargo audit (fatal)"
+	@echo "  deny             - Run cargo deny check (fatal)"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  bench            - Run benchmarks"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-test      - Build and run tests in Docker"
 
-# Install binaries
+# Install the syauth CLI binary into ~/.cargo/bin.
 .PHONY: install
 install:
-	$(CARGO) install --path . --bin syauth
+	$(CARGO) install --path crates/syauth-cli --bin syauth
 
-# Run all tests
+# Run all tests across the whole workspace.
 .PHONY: test
 test:
-	$(CARGO) test --all-targets --all-features
+	$(CARGO) test --workspace --all-targets --all-features
 
-# Run all tests with verbose output
+# Run all tests with verbose output.
 .PHONY: testv
 testv:
-	$(CARGO) test --all-targets --all-features -- --nocapture
+	$(CARGO) test --workspace --all-targets --all-features -- --nocapture
 
-# Run benchmarks
+# Run benchmarks (no-op until a crate adds a `[[bench]]` target).
 .PHONY: bench
 bench:
-	$(CARGO) bench --all-features
+	$(CARGO) bench --workspace --all-features
 
-# Lint: clippy + fmt check + audit
+# Lint pipeline. Short-circuits on the first failing tool so the first error
+# the developer sees is the first thing to fix.
+#
+# Order:
+#   1. clippy  (denies warnings)
+#   2. fmt --check
+#   3. cargo audit  (non-fatal in lint; sibling `audit` target is fatal)
+#   4. cargo deny check  (fatal)
 .PHONY: lint
 lint:
 	@echo "Running clippy..."
-	$(CARGO) clippy --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@echo "Checking formatting..."
 	$(CARGO) fmt --all --check
 	@echo "Running cargo audit..."
 	$(CARGO) audit || true
+	@echo "Running cargo deny check..."
+	$(CARGO) deny check
 	@echo "Linting complete"
 
-# Format code
+# Format code.
 .PHONY: fmt
 fmt:
 	$(CARGO) fmt --all
 
-# Security audit
+# Security audit (fatal). Use `make lint` for the non-fatal CI variant.
 .PHONY: audit
 audit:
 	$(CARGO) audit
+
+# Cargo-deny check (advisories, bans, licenses, sources). Fatal.
+.PHONY: deny
+deny:
+	$(CARGO) deny check
 
 # Clean build artifacts
 .PHONY: clean

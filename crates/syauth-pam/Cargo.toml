@@ -1,0 +1,22 @@
+# syauth-pam — Linux PAM module shipped as `libpam_syauth.so`.
+#
+# Roadmap items S-008, S-009. S-001 ships only the cdylib placeholder so that
+# `make build` produces `target/release/libpam_syauth.so` — this proves the
+# `cdylib` crate-type and the `pam_syauth` library name resolve correctly long
+# before any `pam_sm_*` symbol exists.
+
+[package]
+name = "syauth-pam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth Linux PAM module (cdylib → libpam_syauth.so)"
+
+[lib]
+name = "pam_syauth"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true

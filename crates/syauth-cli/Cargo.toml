@@ -1,0 +1,19 @@
+# syauth-cli — the `syauth` binary (pair / list / revoke / status / install-pam).
+#
+# Roadmap items S-011..S-013. S-001 only stands up the placeholder so the
+# workspace resolves and `cargo build --workspace` exercises the binary path.
+
+[package]
+name = "syauth-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth command-line tool (pair, list, revoke, status, install-pam)"
+
+[[bin]]
+name = "syauth"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+# syauth-mobile — UniFFI-exported surface consumed by the Android companion.
+#
+# Roadmap item S-014. Mirrors `~/sources/prrr/prrr-mobile` (crate-type
+# cdylib+staticlib+lib, UniFFI 0.29 build-dependency). S-001 only ships the
+# placeholder library so the workspace resolves; UniFFI itself lands in S-014.
+
+[package]
+name = "syauth-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth shared mobile surface, exported to Kotlin via UniFFI"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

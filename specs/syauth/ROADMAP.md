@@ -14,7 +14,6 @@
 ---
 
 ## Step S-001: Workspace bootstrap & CI lint pipeline
-<!-- status: in_progress claimed-at: 2026-05-15T00:40:00Z claimed-by: orchestrate -->
 
 **Description:** Stand up the Cargo workspace mirroring `~/sources/prrr` (top-level crate + `crates/` directory + `syauth-android/` placeholder), wire `make build/test/lint/fmt/audit`, and confirm an empty `cargo clippy -- -D warnings` is clean. No business code yet — this is the load-bearing scaffolding every other item builds on.
 
@@ -22,21 +21,61 @@
 - SPEC.md reviewed and accepted.
 
 **DoD (Definition of Done):**
-- [ ] `Cargo.toml` declares a workspace with members listed (placeholders allowed: empty `lib.rs` in each crate is fine).
-- [ ] Directories exist: `crates/syauth-core/`, `crates/syauth-transport/`, `crates/syauth-pam/`, `crates/syauth-cli/`, `crates/syauth-mobile/`, `syauth-android/` (Gradle placeholder).
-- [ ] Workspace-level `clippy.toml` and `rustfmt.toml` are inherited; existing values from this repo are preserved.
-- [ ] `make build` produces `target/release/libpam_syauth.so` (even if it exports no PAM symbols yet — proves the `cdylib` crate-type works).
-- [ ] `make test` runs (passes with zero tests) for the whole workspace.
-- [ ] `make lint` runs and passes — clippy clean across all crates, fmt clean, `cargo audit` non-fatal.
-- [ ] `cargo deny check` config exists in `deny.toml` and passes (advisories, bans, licenses).
-- [ ] A CI workflow file (e.g. `.github/workflows/ci.yml`) runs `make lint` and `make test` on every push.
+- [x] `Cargo.toml` declares a workspace with members listed (placeholders allowed: empty `lib.rs` in each crate is fine).
+- [x] Directories exist: `crates/syauth-core/`, `crates/syauth-transport/`, `crates/syauth-pam/`, `crates/syauth-cli/`, `crates/syauth-mobile/`, `syauth-android/` (Gradle placeholder).
+- [x] Workspace-level `clippy.toml` and `rustfmt.toml` are inherited; existing values from this repo are preserved.
+- [x] `make build` produces `target/release/libpam_syauth.so` (even if it exports no PAM symbols yet — proves the `cdylib` crate-type works).
+- [x] `make test` runs (passes with zero tests) for the whole workspace.
+- [x] `make lint` runs and passes — clippy clean across all crates, fmt clean, `cargo audit` non-fatal.
+- [x] `cargo deny check` config exists in `deny.toml` and passes (advisories, bans, licenses).
+- [x] A CI workflow file (e.g. `.github/workflows/ci.yml`) runs `make lint` and `make test` on every push.
+
+### Evidence
+
+**Created / modified files (with one-line purpose):**
+
+- `Cargo.toml` — new workspace manifest listing the five `crates/*` members, `[workspace.package]` with edition 2024 and rust-version 1.85, `[workspace.lints.rust] unsafe_code = "deny"`, and a no-API root package that hosts the repo-level `tests/` directory.
+- `src/lib.rs` — empty root-package library (doc-comment only) so `cargo test --workspace` discovers `tests/workspace_smoke.rs`.
+- `tests/workspace_smoke.rs` — single integration test asserting `1 + 1 == 2`, proving the workspace test harness compiles and runs.
+- `crates/syauth-core/{Cargo.toml,src/lib.rs}` — placeholder library crate for S-002..S-006.
+- `crates/syauth-transport/{Cargo.toml,src/lib.rs}` — placeholder library crate for S-007/S-010.
+- `crates/syauth-pam/{Cargo.toml,src/lib.rs}` — `cdylib + rlib` with `name = "pam_syauth"`, produces `libpam_syauth.so`.
+- `crates/syauth-cli/{Cargo.toml,src/main.rs}` — placeholder binary `syauth` for S-011..S-013.
+- `crates/syauth-mobile/{Cargo.toml,src/lib.rs}` — placeholder library crate for S-014.
+- `syauth-android/{settings.gradle.kts,README.md,app/.gitkeep}` — Gradle placeholder for S-015.
+- `deny.toml` — new cargo-deny policy (advisories deny on RustSec DB; permissive OSS license allow-list mirroring prrr's transitive set; bans wildcards; sources restricted to crates.io).
+- `.github/workflows/ci.yml` — new GitHub Actions workflow with three jobs (`lint`, `test`, `build`) on every push and pull_request; uses `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`, and `taiki-e/install-action@v2` to fetch `cargo-audit` and `cargo-deny` as prebuilt binaries.
+- `Makefile` — extended (not replaced); `build` now does `cargo build --release --workspace` instead of `--bin syauth`; `test`/`testv`/`bench` are workspace-scoped; new `deny` target; `lint` adds a `cargo deny check` step after `cargo audit`. The promptkit-generated header is preserved verbatim.
+- `specs/journeys/JOURNEY-S-001-workspace-bootstrap.md` — full journey doc per `.agents/skills/journey/SKILL.md`.
+
+**Added test files (with what they verify):**
+
+- `tests/workspace_smoke.rs::workspace_test_harness_compiles_and_runs` — verifies that the integration-test harness compiles and runs against the workspace root package, asserting the canonical `1 + 1 == 2` sum via a named `EXPECTED_SUM` constant (per the AGENTS.md "named constants over literals" rule).
+
+**DoD-box ↔ command-output evidence:**
+
+| DoD box | Command run | Observed result |
+|---|---|---|
+| `Cargo.toml` declares a workspace with members listed | `cargo metadata --no-deps` (implicit via `cargo build --workspace`) | All five members compile in the same `cargo build` invocation. |
+| Directories exist | `ls crates/ && ls syauth-android/` | `syauth-cli  syauth-core  syauth-mobile  syauth-pam  syauth-transport` and `app  README.md  settings.gradle.kts`. |
+| Workspace-level `clippy.toml` and `rustfmt.toml` inherited; existing values preserved | Files were not modified; `cargo clippy --workspace -- -D warnings` and `cargo fmt --all --check` both exit 0. | Existing thresholds in `clippy.toml` (cognitive-complexity 15, too-many-arguments 7, etc.) and `rustfmt.toml` (edition 2024, max_width 140) are untouched and effective. |
+| `make build` produces `target/release/libpam_syauth.so` | `make build && ls -la target/release/libpam_syauth.so` | `-rwxr-xr-x. 2 dmitriy dmitriy 403560 мая 15 00:45 target/release/libpam_syauth.so`. |
+| `make test` runs for the whole workspace | `make test` | Exit 0; `tests/workspace_smoke.rs` reports `1 passed; 0 failed`; all other test result blocks report `0 passed; 0 failed`. |
+| `make lint` runs and passes — clippy clean, fmt clean, audit non-fatal | `make lint` | Exit 0. Clippy clean across all crates; `cargo fmt --check` clean; `cargo audit` ran (its non-zero exit, if any, would be suppressed by `|| true`); `cargo deny check` reports `advisories ok, bans ok, licenses ok, sources ok`. |
+| `cargo deny check` exists and passes | `cargo deny check` | Exit 0. `advisories ok, bans ok, licenses ok, sources ok`. License `unmatched-allowance` warnings are present for future-use entries (`ISC`, `MPL-2.0`, `Zlib`, etc.) and are non-fatal by cargo-deny design. |
+| CI workflow runs `make lint` and `make test` on every push | Inspection of `.github/workflows/ci.yml` | `on: push: branches: ["**"]` and `on: pull_request: branches: ["**"]`; the `lint` job runs `make lint` and the `test` job runs `make test`. |
+
+**Deviations from the original DoD:**
+
+- The PAM crate uses `crate-type = ["cdylib", "rlib"]` rather than `["cdylib"]` alone. The `rlib` form is added so that future S-008 tests in this same crate can `use pam_syauth::...` via the unit-test harness — `cdylib`-only would block `cargo test` from linking the crate's own tests. This is exactly how prrr's mobile crate handles the same constraint (`crate-type = ["cdylib", "staticlib", "lib"]`). The DoD requirement that `target/release/libpam_syauth.so` exist is unaffected and verified above.
+- A root package (`name = "syauth"`) with an empty `src/lib.rs` is included in `Cargo.toml`. This is necessary because the repo-level `tests/` directory has to belong to a package for `cargo test --workspace` to discover it; a pure `[workspace]` (no `[package]`) Cargo.toml would silently skip `tests/workspace_smoke.rs`. The root package exposes no public API and exists solely as a host for the integration test.
 
 **Tests:**
 - `tests/workspace_smoke.rs` — a single integration test that compiles and asserts `1 + 1 == 2`. Proves the test infra works.
 
 **Files likely affected:** `Cargo.toml`, `crates/*/Cargo.toml`, `crates/*/src/lib.rs`, `deny.toml`, `.github/workflows/ci.yml`, `Makefile` (extend).
 
-**Journey:** `JOURNEY-{id}-workspace-bootstrap.md`
+**Journey:** [`JOURNEY-S-001-workspace-bootstrap.md`](../journeys/JOURNEY-S-001-workspace-bootstrap.md)
 
 ---
 

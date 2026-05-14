@@ -1,0 +1,82 @@
+# syauth — Continuous Integration.
+#
+# Roadmap item S-001 — runs the same `make lint` and `make test` gates on
+# every push and pull request that a developer runs locally. Targets stable
+# Rust on Ubuntu. Uses `taiki-e/install-action` to pull `cargo-audit` and
+# `cargo-deny` as prebuilt binaries (~5 s on cache miss) rather than building
+# them from source.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: lint (clippy + fmt + audit + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: make lint
+        run: make lint
+
+  test:
+    name: test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: make test
+        run: make test
+
+  build:
+    name: build (release cdylib)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: make build
+        run: make build
+
+      - name: Verify libpam_syauth.so exists
+        run: test -f target/release/libpam_syauth.so

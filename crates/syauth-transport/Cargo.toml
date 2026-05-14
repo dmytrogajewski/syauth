@@ -1,0 +1,17 @@
+# syauth-transport — BtPeer trait + BlueZ central + LAN fallback.
+#
+# Roadmap items S-007, S-010. S-001 only stands up the placeholder.
+
+[package]
+name = "syauth-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth transport layer (BLE GATT central via bluer + mock)"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

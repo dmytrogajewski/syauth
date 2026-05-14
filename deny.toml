@@ -1,0 +1,85 @@
+# cargo-deny configuration for syauth.
+#
+# Roadmap item S-001 — license/advisory/ban policy. Mirrors the implicit policy
+# of the sibling `~/sources/prrr` workspace: a permissive allow-list aligned
+# with the OSS-first stance from AGENTS.md, plus deny on every advisory the
+# RustSec DB knows about. Adjusted via `cargo deny check` runs locally and in
+# CI on every push.
+#
+# Schema reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Target triples we ship to. Limits dep-graph analysis to platforms we actually
+# build for. Android targets are evaluated when the mobile crate gets enabled
+# in S-014.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "aarch64-linux-android" },
+    { triple = "armv7-linux-androideabi" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories — RustSec database.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# `db-path` and `db-urls` use defaults; the RustSec advisory DB on GitHub.
+yanked = "warn"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses.
+# ---------------------------------------------------------------------------
+#
+# Allow-list calibrated to common Rust OSS licenses. Anything outside this set
+# requires an explicit exception (added here with rationale).
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+]
+exceptions = []
+
+# `clarify` and `private` entries are deliberately empty for v0.1; we have no
+# vendored or private deps that need re-licensing yet.
+
+# ---------------------------------------------------------------------------
+# Bans — crate-graph hygiene.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources — where crates may be fetched from.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,50 @@
+# Workspace manifest for syauth.
+#
+# Roadmap: specs/syauth/ROADMAP.md — item S-001.
+# Spec: specs/syauth/SPEC.md §4.1 (workspace layout).
+# Mirrors the layout of ~/sources/prrr: a top-level package plus a `crates/`
+# directory of member crates. No business code lives here yet — S-002+ fills in
+# each crate.
+
+[workspace]
+members = [
+    "crates/syauth-core",
+    "crates/syauth-transport",
+    "crates/syauth-pam",
+    "crates/syauth-cli",
+    "crates/syauth-mobile",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["syauth contributors"]
+repository = "https://github.com/sy/syauth"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+# Top-level package exists so that the repo-root `tests/` directory (which
+# `cargo test --workspace` discovers via the root package) compiles. The root
+# package itself ships no library code — every crate of substance lives under
+# `crates/`.
+[package]
+name = "syauth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Phone-as-key unlock for Linux PAM (workspace root)"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
