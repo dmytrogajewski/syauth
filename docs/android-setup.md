@@ -104,10 +104,98 @@ follow-up (tracked alongside S-018's background bridge) tightens this
 to use a Keystore-wrapped seed via a `Cipher`-init flow once the
 Keystore's Ed25519 support stabilizes on the targeted device range.
 
+## Battery-optimization exclusion (S-018)
+
+`SyauthCompanionService` is bound by the OS only while the bonded
+peer is observed in BLE range. Without an explicit battery-optimization
+exclusion the OS will doze the app within minutes, and the binding will
+quietly stop being delivered. The setup is one tap from the user once,
+and the app pops the system dialog on first launch (and again after a
+fresh CDM association).
+
+### Why the deep-link
+
+`Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` was introduced
+in API 23 (doze, Marshmallow). API 30 (R) tightened the doze rules
+significantly and added the App Standby Buckets that progressively
+restrict our binding the longer the app sits idle. API 33 added
+`POST_NOTIFICATIONS` as a runtime grant — the user must accept the
+notification permission separately from battery optimisation. API 34
+introduced the `connectedDevice` foreground-service sub-type the
+manifest declares; without it our service cannot stay foregrounded
+while bound on Android 14+.
+
+The deep-link util lives at
+`syauth-android/app/src/main/kotlin/com/sy/syauth/android/bg/BatteryOptimizationDeepLink.kt`
+as `batteryOptimizationDeepLinkIntent(context)`. It returns the system
+intent that opens the per-app battery optimization dialog;
+`isIgnoringBatteryOptimizations(context)` returns whether the
+exclusion is already granted.
+
+### When the app should prompt
+
+1. **First launch** — the home screen calls
+   `isIgnoringBatteryOptimizations` and, if false, fires the deep-link
+   immediately.
+2. **After a fresh CDM association** — the pair-complete state
+   transitions to `Bonded`, then the home screen re-runs the check on
+   re-entry. This catches the case where the user accepted CDM but
+   skipped (or revoked) the battery prompt.
+
+### OEM-specific notes
+
+Xiaomi MIUI, OnePlus, Vivo, and Oppo skins are notorious for ignoring
+the CDM contract — they apply additional kill rules on top of the OS
+defaults. The mitigation is the same exclusion plus a per-OEM
+"autostart" toggle that lives outside the public Android API. We
+document the known workarounds in the README's troubleshooting section
+once the test rack covers each skin; for now the SPEC §7 open
+question 2 tracks this gap.
+
+## Companion-device association lifecycle (S-018)
+
+The S-018 flow registers the bonded computer with
+`CompanionDeviceManager.associate()` so the OS will wake the app via
+`CompanionDeviceService` whenever the peer comes into BLE range.
+
+### When the association is requested
+
+- **At pair-complete (S-016 happy path).** The
+  `PairingViewModel` calls
+  `companionAssociator.associate(peer)` immediately after
+  `bondPersister.persist(record)` succeeds and **before**
+  transitioning to `Bonded(name)`. The user sees two consecutive OS
+  prompts during pairing:
+  1. The BT pairing numeric-comparison dialog (LESC).
+  2. The CDM "syauth wants to remember this companion device" dialog.
+- **On user revocation.** If the user removes the pair via system
+  settings, the OS stops binding the service. Re-establishing the
+  binding requires re-pairing — there is no resurrect-without-pair
+  path in v0.1.
+
+### Service-binding lifecycle
+
+- The OS observes the bonded peer in BLE range via its native
+  scanner; it does not consult `BLUETOOTH_SCAN` ours.
+- On peer-in-range it binds `SyauthCompanionService` (the manifest
+  `CompanionDeviceService` subclass) and calls
+  `onDeviceAppeared(AssociationInfo)`.
+- Our service opens a `BluetoothGattServer` via
+  `BluerlessGattServerController` and registers two characteristics
+  (challenge / response) under `SYAUTH_GATT_SERVICE_UUID`.
+- On peer-out-of-range the OS calls
+  `onDeviceDisappeared(AssociationInfo)`; we close the GATT server.
+
+### Why the GATT server is short-lived
+
+Keeping a long-lived foreground service draining the radio is exactly
+what `CompanionDeviceService` exists to avoid. The OS owns the
+lifecycle; we own only the GATT setup/teardown within the binding's
+lifetime. The result: zero radio usage when the bonded peer is out of
+range, and zero process-keepalive battery cost.
+
 ## Future setup steps
 
 The following will be appended as future roadmap items land:
 
-- **S-018** — disable battery optimization for syauth, register
-  CompanionDeviceManager association, notification channel setup.
 - **S-019** — pairing recovery (re-bond after factory reset).

@@ -179,6 +179,12 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.02.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    // S-018: CdmLifecycleTest needs JUnit-style assumptions + test rules.
+    // junit-ktx pulls in the Kotlin coroutines test helpers; `rules` adds
+    // `ActivityScenarioRule` and friends for instrumented service tests.
+    androidTestImplementation("androidx.test.ext:junit-ktx:1.1.5")
+    androidTestImplementation("androidx.test:rules:1.5.0")
+    androidTestImplementation("androidx.test:runner:1.5.2")
 
     // Compose tooling + the manifest that registers the test ComponentActivity
     // host. Without `ui-test-manifest`, `createAndroidComposeRule<MainActivity>`

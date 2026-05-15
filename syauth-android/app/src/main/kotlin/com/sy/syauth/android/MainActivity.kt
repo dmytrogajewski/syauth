@@ -25,7 +25,10 @@ package com.sy.syauth.android
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.util.Base64
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -49,9 +53,22 @@ import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navOptions
+import com.sy.syauth.android.approve.AndroidBiometricPresenter
+import com.sy.syauth.android.approve.AndroidKeystoreSigner
+import com.sy.syauth.android.approve.ApproveScreen
+import com.sy.syauth.android.approve.ApproveViewModel
+import com.sy.syauth.android.approve.InMemorySigningKeyProvider
+import com.sy.syauth.android.approve.UniffiWireSigner
+import com.sy.syauth.android.bg.B64_FLAGS
+import com.sy.syauth.android.bg.EXTRA_CHALLENGE_B64
+import com.sy.syauth.android.bg.EXTRA_HOSTNAME
+import com.sy.syauth.android.bg.EXTRA_PEER_ID
+import com.sy.syauth.android.bg.GattResponseSender
 import com.sy.syauth.android.pair.PairingScreen
 import com.sy.syauth.android.pair.PairingViewModel
 import com.sy.syauth.android.pair.api.BondPersister
@@ -110,24 +127,78 @@ object NavRoutes {
  * extends `ComponentActivity`; the test rule constructs the same type
  * either way.
  */
+/**
+ * Payload extracted from an approve intent (S-018). Parsed once at
+ * `onCreate` / `onNewIntent` and held in a `MutableState` so the
+ * NavHost composable can react to a fresh approve request without
+ * losing other state.
+ */
+internal data class ApprovePayload(
+    val challengeBytes: ByteArray,
+    val hostname: String,
+    val peerId: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ApprovePayload) return false
+        return challengeBytes.contentEquals(other.challengeBytes) &&
+            hostname == other.hostname &&
+            peerId == other.peerId
+    }
+
+    override fun hashCode(): Int {
+        var result = challengeBytes.contentHashCode()
+        result = 31 * result + hostname.hashCode()
+        result = 31 * result + peerId.hashCode()
+        return result
+    }
+}
+
+internal fun parseApprovePayload(intent: Intent?): ApprovePayload? {
+    if (intent == null) return null
+    if (intent.action != Intent.ACTION_VIEW) return null
+    val b64 = intent.getStringExtra(EXTRA_CHALLENGE_B64) ?: return null
+    val hostname = intent.getStringExtra(EXTRA_HOSTNAME) ?: return null
+    val peerId = intent.getStringExtra(EXTRA_PEER_ID) ?: return null
+    val bytes = runCatching { Base64.decode(b64, B64_FLAGS) }.getOrNull() ?: return null
+    return ApprovePayload(challengeBytes = bytes, hostname = hostname, peerId = peerId)
+}
+
 class MainActivity : FragmentActivity() {
+    /**
+     * Latest approve payload extracted from the activity's intent.
+     * Mutated by both `onCreate` and `onNewIntent`; observed by the
+     * Compose tree to navigate to the approve route.
+     */
+    internal val approvePayload = mutableStateOf<ApprovePayload?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        approvePayload.value = parseApprovePayload(intent)
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    SyauthApp(applicationContext = applicationContext)
+                    SyauthApp(
+                        activity = this,
+                        approvePayload = approvePayload.value,
+                    )
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        approvePayload.value = parseApprovePayload(intent)
+    }
 }
 
 @Composable
-private fun SyauthApp(applicationContext: Context) {
+private fun SyauthApp(activity: FragmentActivity, approvePayload: ApprovePayload?) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = NavRoutes.HOME) {
         composable(NavRoutes.HOME) {
@@ -141,7 +212,7 @@ private fun SyauthApp(applicationContext: Context) {
             // back-navigation Compose disposes the entry and the ViewModel
             // is GCed. PairBackend is a no-op stub for S-016 because the
             // real BT stack wiring lands in S-018; the rest is real prod.
-            val context = applicationContext
+            val context = activity.applicationContext
             val factory = remember(context) { PairingViewModelFactoryHolder.build(context) }
             val viewModel: PairingViewModel = viewModel(factory = factory)
             val state by viewModel.state.collectAsState()
@@ -157,16 +228,64 @@ private fun SyauthApp(applicationContext: Context) {
             )
         }
         composable(NavRoutes.APPROVE) {
-            // The Approve destination is reachable only when a real
-            // challenge arrives (S-018). For S-017 we render a small
-            // placeholder so the route is exercised; the real
-            // ApproveScreen is constructed by S-018 with a
-            // ChallengeFrame-bearing ViewModel and tested directly via
-            // the androidTest fixture in `approve/ApproveScreenTest.kt`.
-            Text(text = "Approve destination (driven by S-018).")
+            // Constructed when the user taps an approve notification.
+            // The payload is captured at MainActivity-level; if it is
+            // null we render a placeholder rather than crashing —
+            // this branch is only reachable via direct navigation in
+            // tests.
+            if (approvePayload == null) {
+                Text(text = "Approve destination (no payload).")
+            } else {
+                ApproveRoute(activity = activity, payload = approvePayload)
+            }
         }
     }
+    // Side-effect: when the activity receives a fresh approve payload
+    // (cold-start or via onNewIntent), navigate to the approve route.
+    NavigateOnApprovePayload(navController = navController, payload = approvePayload)
 }
+
+@Composable
+private fun NavigateOnApprovePayload(
+    navController: NavHostController,
+    payload: ApprovePayload?,
+) {
+    if (payload == null) return
+    androidx.compose.runtime.LaunchedEffect(payload) {
+        val opts = navOptions {
+            launchSingleTop = true
+            popUpTo(NavRoutes.HOME) { inclusive = false }
+        }
+        navController.navigate(NavRoutes.APPROVE, opts)
+    }
+}
+
+@Composable
+private fun ApproveRoute(activity: FragmentActivity, payload: ApprovePayload) {
+    val viewModel = remember(payload) {
+        ApproveViewModel(
+            hostname = payload.hostname,
+            challengeFrame = payload.challengeBytes,
+            keystoreSigner = AndroidKeystoreSigner(),
+            biometricPresenter = AndroidBiometricPresenter(
+                activity = activity,
+                hostname = payload.hostname,
+            ),
+            // The Ed25519 seed provider is wired to an in-memory zero
+            // seed for the v0.1 lifecycle; the Keystore-wrapped seed
+            // follow-up (tracked in docs/android-setup.md) replaces this
+            // with a Cipher-init flow. Loaded eagerly so the seed bytes
+            // never live in a long-running buffer.
+            signingKeyProvider = InMemorySigningKeyProvider(ByteArray(ED25519_SEED_LEN)),
+            wireSigner = UniffiWireSigner(),
+            responseSender = GattResponseSender(peerId = payload.peerId),
+        )
+    }
+    ApproveScreen(viewModel = viewModel)
+}
+
+/** Ed25519 seed length, named so we don't sprinkle the literal `32`. */
+private const val ED25519_SEED_LEN: Int = 32
 
 @Composable
 private fun HomeRoute(onPairTapped: () -> Unit) {
@@ -218,6 +337,10 @@ internal fun OobScreen() {
  * Factory glue: builds the production dependency graph for
  * [PairingViewModel]. Kept simple — no DI container; this is the entire
  * production wiring in one place so a reviewer can audit the seams.
+ *
+ * S-018 additions: injects a [com.sy.syauth.android.pair.impl.RealCompanionAssociator]
+ * so the OOB-yes happy path also registers the bonded peer with
+ * `CompanionDeviceManager.associate()`.
  */
 private object PairingViewModelFactoryHolder {
     fun build(context: Context): androidx.lifecycle.ViewModelProvider.Factory =
@@ -231,33 +354,48 @@ private object PairingViewModelFactoryHolder {
                         as? BluetoothManager
                     manager?.adapter
                 }.getOrNull()
+                val associator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    com.sy.syauth.android.pair.impl.RealCompanionAssociator(context = context)
+                } else {
+                    // CompanionDeviceManager API requires API 26+.
+                    // On older devices we fall through to the no-op
+                    // associator — the ViewModel still completes the
+                    // Yes path and emits `Bonded`, but the OS will
+                    // not bind the service. This branch is unreachable
+                    // because the app's minSdk is 26; the code exists
+                    // so a future bump to a lower minSdk does not
+                    // silently break.
+                    com.sy.syauth.android.pair.NoopCompanionAssociator()
+                }
                 return PairingViewModel(
                     backend = StubPairBackend(),
                     oobCalculator = UniffiOobCalculator(),
                     bondPersister = InMemoryBondPersister(),
                     bondRemover = ReflectionBondRemover(adapter = adapter),
+                    companionAssociator = associator,
                 ) as T
             }
         }
 }
 
 /**
- * Placeholder [PairBackend] for S-016 — the real Bluetooth-stack wiring
- * lands in S-018 (CompanionDeviceService). The stub keeps the screen
- * from crashing on launch but does not advance past `Scanning`.
+ * Placeholder [PairBackend] — the production BLE-scan/LESC-bond
+ * wiring is out of scope for S-018 (which delivers the
+ * CompanionDeviceService + GATT server background bridge instead).
+ * The stub keeps the screen from crashing on launch but does not
+ * advance past `Scanning`.
  *
- * On a developer device, tapping "Pair with computer" reaches `Scanning`
- * and stays there until S-018 plugs in the real backend. This is the
- * intentional behavior — DoR for S-018 explicitly assumes a working
- * Compose surface, which this commit delivers.
+ * Once a real backend is in place, the OOB-yes happy path will run
+ * through the [com.sy.syauth.android.pair.impl.RealCompanionAssociator]
+ * the S-018 factory now installs.
  */
 private class StubPairBackend : PairBackend {
     override fun startScan() = Unit
     override fun stopScan() = Unit
     override fun pickPeer(peer: PeerHandle): PickPeerResult =
-        PickPeerResult.Failed("pairing backend not yet implemented (S-018)")
+        PickPeerResult.Failed("pairing backend not yet implemented (post-S-018)")
     override fun awaitLescResult(): LescResult =
-        LescResult.Failed("pairing backend not yet implemented (S-018)")
+        LescResult.Failed("pairing backend not yet implemented (post-S-018)")
 }
 
 /**

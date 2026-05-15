@@ -14,15 +14,18 @@
 // exactly one transition or one negative invariant.
 package com.sy.syauth.android.pair
 
+import com.sy.syauth.android.pair.api.AssociationHandle
 import com.sy.syauth.android.pair.api.BluetoothBondRemover
 import com.sy.syauth.android.pair.api.BondPersister
 import com.sy.syauth.android.pair.api.BondRecord
+import com.sy.syauth.android.pair.api.CompanionAssociator
 import com.sy.syauth.android.pair.api.LescResult
 import com.sy.syauth.android.pair.api.OobCalculator
 import com.sy.syauth.android.pair.api.PairBackend
 import com.sy.syauth.android.pair.api.PeerHandle
 import com.sy.syauth.android.pair.api.PersistError
 import com.sy.syauth.android.pair.api.PickPeerResult
+import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -101,19 +104,42 @@ private class FakeBondRemover(
     }
 }
 
+/**
+ * Always-success [CompanionAssociator] used by the S-016 tests. The
+ * S-018 association assertions live in `PairingViewModelCdmAssociationTest.kt`;
+ * the S-016 tests treat the seam as a no-op that does not change their
+ * pre-existing assertions.
+ */
+private class AlwaysSuccessAssociator : CompanionAssociator {
+    var callCount: Int = 0
+        private set
+
+    override suspend fun associate(peer: PeerHandle): Result<AssociationHandle> {
+        callCount += 1
+        return Result.success(AssociationHandle(associationId = 1L, peerId = peer.id))
+    }
+}
+
 private fun newViewModel(
     backend: FakePairBackend = FakePairBackend(),
     oobCalculator: FakeOobCalculator = FakeOobCalculator(),
     bondPersister: FakeBondPersister = FakeBondPersister(),
     bondRemover: FakeBondRemover = FakeBondRemover(),
+    associator: AlwaysSuccessAssociator = AlwaysSuccessAssociator(),
 ): Quad {
     val vm = PairingViewModel(
         backend = backend,
         oobCalculator = oobCalculator,
         bondPersister = bondPersister,
         bondRemover = bondRemover,
+        companionAssociator = associator,
+        // `Dispatchers.Unconfined` runs `viewModelScope.launch { ... }`
+        // eagerly on the current thread so the state transitions
+        // visible to the assertions below happen synchronously — the
+        // S-016 test contract pre-dates S-018's suspend hop.
+        associateDispatcher = Dispatchers.Unconfined,
     )
-    return Quad(vm, backend, oobCalculator, bondPersister, bondRemover)
+    return Quad(vm, backend, oobCalculator, bondPersister, bondRemover, associator)
 }
 
 /** Multi-return helper. */
@@ -123,6 +149,7 @@ private class Quad(
     val oobCalculator: FakeOobCalculator,
     val bondPersister: FakeBondPersister,
     val bondRemover: FakeBondRemover,
+    val associator: AlwaysSuccessAssociator,
 )
 
 private val TEST_PEER: PeerHandle = PeerHandle(id = "AA:BB:CC:DD:EE:FF", name = "alex-desktop")

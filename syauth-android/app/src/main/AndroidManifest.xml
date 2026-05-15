@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Roadmap items S-016 (BLE pairing) and S-017 (BiometricPrompt) — manifest
-  carries the runtime permissions the pairing screen and the Approve screen
-  need.
+  Roadmap items S-016 (BLE pairing), S-017 (BiometricPrompt), and
+  S-018 (CompanionDeviceService background bridge) — manifest carries
+  the runtime permissions the pairing screen, the Approve screen, and
+  the background bridge need.
 
   Permission contract (audited in
   specs/journeys/JOURNEY-S-016-android-pairing.md "Bluetooth Permission
-  Contract" and specs/journeys/JOURNEY-S-017-android-approve.md):
+  Contract", specs/journeys/JOURNEY-S-017-android-approve.md, and
+  specs/journeys/JOURNEY-S-018-android-background-bridge.md):
 
     - BLUETOOTH_SCAN     — scan for advertising peers (S-016 Phase 2).
                            Runtime permission on API 31+.
@@ -16,19 +18,31 @@
                            position).
     - BLUETOOTH_CONNECT  — connect to a chosen peer + initiate LESC
                            bonding (S-016 Phase 3). Runtime permission
-                           on API 31+.
+                           on API 31+. Also required by the GATT server
+                           the S-018 service opens.
     - ACCESS_FINE_LOCATION (maxSdkVersion=30) — legacy: BLE scans on
                            API 26-30 require location. The cap prevents
                            the dialog from showing on API 31+.
     - USE_BIOMETRIC      — gates the Keystore-backed signing key on a
                            fresh user gesture via BiometricPrompt
                            (S-017 Approve screen).
+    - REQUEST_COMPANION_RUN_IN_BACKGROUND — keeps the
+                           CompanionDeviceService binding alive while
+                           the bonded peer is in range (S-018).
+    - POST_NOTIFICATIONS — runtime permission on API 33+ for the
+                           approve heads-up notification (S-018).
+    - FOREGROUND_SERVICE — the CompanionDeviceService runs in the
+                           foreground while bound (S-018). The OS
+                           does the elevation; we only need the
+                           manifest declaration.
+    - FOREGROUND_SERVICE_CONNECTED_DEVICE — Android 14 sub-type
+                           required when a foreground service exists
+                           because of a bonded device (S-018).
 
   Explicitly NOT declared (still owned by future roadmap items):
     - INTERNET             — never (BLE-only protocol per SPEC §3.4).
     - BLUETOOTH_ADVERTISE  — never (desktop advertises; phone scans —
                               SPEC §3.2 D8, presence-tracking defense).
-    - POST_NOTIFICATIONS   — S-018 (CompanionDeviceService).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -55,6 +69,19 @@
     -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
+    <!--
+      S-018: CompanionDeviceService background bridge. The four
+      permissions below are mandatory for the OS to bind our
+      `SyauthCompanionService` when the bonded peer comes into BLE
+      range. See `bg/SyauthCompanionService.kt`.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+        tools:targetApi="34" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
@@ -70,6 +97,35 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              S-018: deep-link from the approve notification's
+              PendingIntent. The action is `ACTION_VIEW` and the data
+              scheme is `syauth://approve/<peerId>`; MainActivity
+              parses the extras and navigates to the approve route.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="syauth" android:host="approve" />
+            </intent-filter>
         </activity>
+
+        <!--
+          S-018: `CompanionDeviceService` subclass the OS binds when
+          the bonded peer comes into BLE range. The class is
+          system-instantiated; exported=true is required so the OS
+          can bind it. `BIND_COMPANION_DEVICE_SERVICE` is the
+          signature-level permission Android enforces on the bind.
+        -->
+        <service
+            android:name=".bg.SyauthCompanionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE"
+            android:foregroundServiceType="connectedDevice"
+            tools:targetApi="31">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

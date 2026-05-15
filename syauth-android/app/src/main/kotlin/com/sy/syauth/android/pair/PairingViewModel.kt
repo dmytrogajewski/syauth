@@ -21,27 +21,36 @@
 //     I/O (BT scan, LESC handshake) is the backend's job. This keeps the
 //     test on `UnconfinedTestDispatcher` and asserts behavior, not timing.
 //
-// Why no `viewModelScope.launch { ... }`:
-//   The Pairing flow is event-driven from the UI side and the radio side.
-//   The UI thread emits taps; the BT stack emits bond-complete callbacks;
-//   the ViewModel folds them into the state machine. There is no
-//   long-running computation we need to background. The UniFFI HKDF call
-//   is microseconds (S-015 already proves it on real ARMv8 hardware).
+// On `viewModelScope.launch { ... }`:
+//   For S-016 we did not need this; every transition was synchronous.
+//   S-018 added a single suspend hop on the OOB-yes happy path —
+//   `companionAssociator.associate(peer)` shows an OS dialog and
+//   resolves on a callback — so the Yes path now ends with a
+//   `viewModelScope.launch(associateDispatcher) { ... }`. Tests pass
+//   `Dispatchers.Unconfined` so the assertions in
+//   PairingViewModelTest stay synchronous; production uses
+//   `Dispatchers.Main.immediate`.
 package com.sy.syauth.android.pair
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.sy.syauth.android.pair.api.BluetoothBondRemover
 import com.sy.syauth.android.pair.api.BondPersister
 import com.sy.syauth.android.pair.api.BondRecord
+import com.sy.syauth.android.pair.api.CompanionAssociationError
+import com.sy.syauth.android.pair.api.CompanionAssociator
 import com.sy.syauth.android.pair.api.LescResult
 import com.sy.syauth.android.pair.api.OobCalculator
 import com.sy.syauth.android.pair.api.PairBackend
 import com.sy.syauth.android.pair.api.PeerHandle
 import com.sy.syauth.android.pair.api.PersistError
 import com.sy.syauth.android.pair.api.PickPeerResult
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Reason strings are constants so the unit test can assert on them
@@ -54,6 +63,38 @@ internal object PairingReasons {
     const val OOB_MISMATCH: String =
         "OOB code did not match — peer might be a relay attacker"
     const val PERSIST_PREFIX: String = "could not persist bond: "
+
+    /**
+     * Prefix for the Failed reason emitted when [CompanionAssociator]
+     * returns a failure (S-018). The full string is
+     * `companion-device association rejected: <reason>`.
+     */
+    const val ASSOCIATE_PREFIX: String = "companion-device association rejected: "
+}
+
+/**
+ * No-op fallback [CompanionAssociator]. Used by callers that have not
+ * been migrated to S-018 yet (the S-016-era test wiring); production
+ * code never installs this — it injects [com.sy.syauth.android.pair.impl.RealCompanionAssociator].
+ *
+ * Returns a synthetic [com.sy.syauth.android.pair.api.AssociationHandle]
+ * so the happy path still ends in [PairingState.Bonded] for tests that
+ * don't exercise the associator seam directly.
+ */
+internal class NoopCompanionAssociator : CompanionAssociator {
+    override suspend fun associate(
+        peer: com.sy.syauth.android.pair.api.PeerHandle,
+    ): Result<com.sy.syauth.android.pair.api.AssociationHandle> =
+        Result.success(
+            com.sy.syauth.android.pair.api.AssociationHandle(
+                associationId = NOOP_ASSOCIATION_ID,
+                peerId = peer.id,
+            ),
+        )
+
+    private companion object {
+        const val NOOP_ASSOCIATION_ID: Long = -1L
+    }
 }
 
 class PairingViewModel(
@@ -61,6 +102,8 @@ class PairingViewModel(
     private val oobCalculator: OobCalculator,
     private val bondPersister: BondPersister,
     private val bondRemover: BluetoothBondRemover,
+    private val companionAssociator: CompanionAssociator = NoopCompanionAssociator(),
+    private val associateDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<PairingState> =
@@ -154,10 +197,25 @@ class PairingViewModel(
     private var stashedBondKey: ByteArray? = null
 
     /**
-     * User tapped Yes on the OOB-match question. Persist the bond and
-     * transition to [Bonded]. If persistence throws, transition to
-     * [Failed] with a PERSIST_PREFIX reason and remove the BT bond
-     * (DoD #3: no residual state on any error path).
+     * User tapped Yes on the OOB-match question. Persist the bond,
+     * request a CDM association (S-018), and transition to [Bonded].
+     *
+     * Failure modes:
+     * - Persist throws -> [Failed] with PERSIST_PREFIX reason + BT
+     *   bond removed.
+     * - Associate returns a failed [Result] -> [Failed] with
+     *   ASSOCIATE_PREFIX reason + BT bond removed AND the just-persisted
+     *   bond record is NOT rolled back at the Kotlin layer because the
+     *   `BondPersister` interface intentionally has no `remove(peerId)`
+     *   method in v0.1 (the `bonds.toml` rollback path is documented as
+     *   "lost = pair again" in SPEC §4.4). We document the residual:
+     *   the BT bond is removed (so the OS won't reuse the LESC bond)
+     *   and the next pair attempt overwrites the persister entry.
+     *
+     * The associate call is suspend, so we launch on [viewModelScope].
+     * Production wires `Dispatchers.Main.immediate` so the state
+     * updates happen on the UI thread; tests inject
+     * `Dispatchers.Unconfined` to run synchronously.
      */
     fun onOobYesTapped() {
         if (_state.value !is PairingState.OobConfirming) return
@@ -171,13 +229,36 @@ class PairingViewModel(
                     bondKey = bondKey,
                 ),
             )
-            _state.value = PairingState.Bonded(peer.name)
         } catch (e: PersistError) {
             removeBondBestEffort()
             _state.value = PairingState.Failed(
                 PairingReasons.PERSIST_PREFIX + (e.message ?: "unknown"),
             )
+            return
         }
+        viewModelScope.launch(associateDispatcher) {
+            requestAssociationAndTransition(peer)
+        }
+    }
+
+    private suspend fun requestAssociationAndTransition(peer: PeerHandle) {
+        val result: Result<com.sy.syauth.android.pair.api.AssociationHandle> = try {
+            companionAssociator.associate(peer)
+        } catch (e: CompanionAssociationError) {
+            Result.failure(e)
+        }
+        result.fold(
+            onSuccess = {
+                _state.value = PairingState.Bonded(peer.name)
+            },
+            onFailure = { throwable ->
+                removeBondBestEffort()
+                val reason = throwable.message ?: throwable::class.java.simpleName
+                _state.value = PairingState.Failed(
+                    PairingReasons.ASSOCIATE_PREFIX + reason,
+                )
+            },
+        )
     }
 
     /**
