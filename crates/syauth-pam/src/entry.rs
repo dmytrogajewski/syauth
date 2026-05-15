@@ -10,10 +10,11 @@
 //!    that escapes the closure becomes a fail-closed return — never
 //!    `PAM_SUCCESS`, never an unwind across the FFI boundary.
 //!
-//! Per S-008 the body of every closure simply logs a documented stub line and
-//! returns `PAM_AUTHINFO_UNAVAIL` (or `PAM_SUCCESS` for `pam_sm_setcred`,
-//! since auth modules must implement `setcred` per the libpam contract).
-//! Real authentication arrives in S-009.
+//! S-009 fills the `pam_sm_authenticate` body with a real call into
+//! [`crate::auth::authenticate`], which drives a challenge/response against
+//! an injectable `BtPeer`. `pam_sm_setcred` still returns `PAM_SUCCESS`
+//! (no credentials to set). `pam_sm_acct_mgmt` remains a stub that returns
+//! `PAM_AUTHINFO_UNAVAIL` — account management is out of scope for v0.1.
 
 use std::{
     ffi::c_int,
@@ -22,6 +23,8 @@ use std::{
 };
 
 use syslog::{Facility, Formatter3164};
+
+use crate::{auth, config::Config};
 
 // -----------------------------------------------------------------------------
 // PAM return-code constants
@@ -167,8 +170,15 @@ where
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pam_sm_authenticate(_pamh: *mut c_void, _flags: c_int, _argc: c_int, _argv: *const *const c_char) -> c_int {
     run_entry(|| {
-        log_info(STUB_LOG_LINE);
-        PAM_AUTHINFO_UNAVAIL
+        let cfg = Config::from_env();
+        let outcome = auth::authenticate(&cfg);
+        log_info(&format!(
+            "syauth: unlock {} reason={} peer_id={}",
+            if outcome.is_success() { "success" } else { "denied" },
+            outcome.reason(),
+            outcome.peer_id().unwrap_or(auth::LAST_LOG_UNKNOWN_PEER),
+        ));
+        outcome.to_pam_code()
     })
 }
 

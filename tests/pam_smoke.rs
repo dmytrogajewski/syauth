@@ -40,7 +40,13 @@ const E2E_GATE_VAR: &str = "SYAUTH_E2E";
 const SO_PATH_PLACEHOLDER: &str = "__SYAUTH_SO_PATH__";
 
 /// The exact substring the e2e test greps for in journalctl output.
-const STUB_LOG_SUBSTR: &str = "syauth: unlock unavailable reason=stub";
+///
+/// S-009 replaced the stub return with real authentication. On a freshly
+/// installed system with no `bonds.toml`, `pam_sm_authenticate` lands on
+/// the "no bonded peer" branch (an empty `BondStore` reads cleanly as an
+/// empty store, then yields `AuthOutcome::AuthInfoUnavail{reason:
+/// "no bonded peer"}`). The syslog line contains the exact reason token.
+const STUB_LOG_SUBSTR: &str = "reason=no bonded peer";
 
 /// The standard libpam string emitted by pamtester when a module returns
 /// `PAM_AUTHINFO_UNAVAIL`. Stable across libpam versions in the Linux PAM
