@@ -11,10 +11,18 @@
 //   - namespace + applicationId -> com.sy.syauth.android
 //   - AAR path -> files("../../crates/syauth-mobile/target/syauth_mobile.aar")
 //   - signingConfigs and release-build minify dropped (S-015 is debug-only)
-//   - testOptions, vectorDrawables blocks dropped (no Robolectric / drawables yet)
-//   - CameraX / ZXing / security-crypto / coroutines / lifecycle-viewmodel-compose
-//     dropped (none used by the hello-world; land in S-016+)
-//   - JVM-side unit-test deps dropped (no Robolectric in S-015)
+//   - vectorDrawables block dropped (no drawables yet)
+//   - CameraX / ZXing / security-crypto / coroutines dropped (none used by
+//     syauth; CameraX/ZXing are prrr-specific QR scanner deps)
+//
+// Deltas since S-015 (additive — every S-015 contract still holds):
+//   - testOptions { unitTests.isIncludeAndroidResources = true; ... }
+//     added for S-016 Robolectric tests in pair/PairingViewModelTest.kt
+//   - androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0 added for the
+//     viewModel() composable in MainActivity.kt
+//   - androidx.navigation:navigation-compose:2.7.7 added for the two-route
+//     NavHost wiring in MainActivity.kt
+//   - junit / Robolectric / androidx.test JVM-side test deps added for S-016
 
 plugins {
     id("com.android.application")
@@ -33,6 +41,15 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // S-016: Robolectric loads the framework resources from the merged
+    // resources tree at test time. Without `isIncludeAndroidResources =
+    // true`, `@Config(sdk = [34])` fails with `Resources$NotFoundException`
+    // on the first `MaterialTheme` lookup. Mirrors prrr-android's setting.
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        unitTests.isReturnDefaultValues = true
     }
 
     buildTypes {
@@ -92,7 +109,15 @@ dependencies {
     // AndroidX Core — the bare minimum to run a ComponentActivity with Compose.
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    // S-016: ViewModel base class for PairingViewModel + viewModel() composable.
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
+
+    // S-016: Navigation between the home and pair routes. Two routes only
+    // — adding navigation-compose is cheaper (one dep, ~50 KB) than
+    // hand-rolling a mutableStateOf-based router and reading like a
+    // real app structure to the next contributor.
+    implementation("androidx.navigation:navigation-compose:2.7.7")
 
     // Jetpack Compose — single screen, Material3 surface + Text.
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
@@ -100,6 +125,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+
+    // S-016: JVM-side unit tests. Robolectric @Config(sdk = [34]) for the
+    // PairingViewModel test class (subclasses androidx.lifecycle.ViewModel
+    // which touches framework code). Hand-rolled fakes, no mockk.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.11.1")
+    testImplementation("androidx.test:core:1.5.0")
+    testImplementation("androidx.test.ext:junit:1.1.5")
 
     // Instrumented test surface — Compose UI test rule + JUnit4 wiring.
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

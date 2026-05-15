@@ -1,24 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Roadmap item S-015 — minimal manifest for the hello-world scaffold.
+  Roadmap item S-016 — manifest carries the Bluetooth permissions the
+  pairing screen needs to scan and bond.
 
-  ZERO permissions are declared on purpose. The hello-world calls a pure
-  function (HKDF + table lookup) and renders a Text composable; no network,
-  no Bluetooth, no biometric, no notifications. The intentionally-omitted
-  permissions and their owning roadmap items, audited in
-  specs/journeys/JOURNEY-S-015-android-scaffold.md:
+  Permission contract (audited in
+  specs/journeys/JOURNEY-S-016-android-pairing.md "Bluetooth Permission
+  Contract"):
 
-    - INTERNET                          — never (BLE-only protocol)
-    - BLUETOOTH_CONNECT / SCAN / ADVERTISE — S-018 (CompanionDeviceService)
-    - POST_NOTIFICATIONS                — S-018 (background bridge)
-    - USE_BIOMETRIC                     — S-017 (BiometricPrompt)
+    - BLUETOOTH_SCAN     — scan for advertising peers (S-016 Phase 2).
+                           Runtime permission on API 31+.
+                           `neverForLocation` flag asserts we don't infer
+                           location from scan results (we don't — the
+                           desktop advertises a rotating UUID, not a
+                           position).
+    - BLUETOOTH_CONNECT  — connect to a chosen peer + initiate LESC
+                           bonding (S-016 Phase 3). Runtime permission
+                           on API 31+.
+    - ACCESS_FINE_LOCATION (maxSdkVersion=30) — legacy: BLE scans on
+                           API 26-30 require location. The cap prevents
+                           the dialog from showing on API 31+.
 
-  Declaring them now would mis-state the app's true surface area, mislead
-  the manifest reviewer, and let a future agent ship a screen that quietly
-  uses a permission S-015 silently granted.
+  Explicitly NOT declared (still owned by future roadmap items):
+    - INTERNET             — never (BLE-only protocol per SPEC §3.4).
+    - BLUETOOTH_ADVERTISE  — never (desktop advertises; phone scans —
+                              SPEC §3.2 D8, presence-tracking defense).
+    - POST_NOTIFICATIONS   — S-018 (CompanionDeviceService).
+    - USE_BIOMETRIC        — S-017 (BiometricPrompt).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- BLE scan: required to discover advertising desktops in S-016 Phase 2. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="31" />
+
+    <!-- BLE connect + LESC bond: S-016 Phase 3. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:targetApi="31" />
+
+    <!-- Legacy: BLE scans on API 26-30 require ACCESS_FINE_LOCATION. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
 
     <application
         android:allowBackup="false"
