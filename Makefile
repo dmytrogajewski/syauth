@@ -33,6 +33,7 @@ help:
 	@echo "  android-aar      - Build syauth_mobile.aar (requires NDK_HOME)"
 	@echo "  android-aar-dry-run - Verify AAR pipeline without NDK"
 	@echo "  android-test     - Run :app:connectedAndroidTest (skips cleanly without emulator/AAR)"
+	@echo "  e2e-real         - Run the SPEC 4.3 nine-case suite against a real Android emulator (gated on SYAUTH_E2E_REAL=1)"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-test      - Build and run tests in Docker"
 
@@ -174,6 +175,34 @@ android-test:
 	else \
 		echo "==> Debug APK not present yet ($$apk_path) — Gradle may have skipped assembleDebug"; \
 	fi
+
+# =============================================================================
+# E2E real-radio target (S-019)
+# =============================================================================
+#
+# SPEC §4.3 — the nine wire cases driven against a real Android emulator
+# and a real BLE radio. Gated on SYAUTH_E2E_REAL=1; default `make test`
+# skips it so a developer box without an emulator/BLE stack stays green.
+#
+# The target chains three steps:
+#   1. scripts/e2e-emulator-up.sh   — boot AVD, install APK, script pair
+#   2. cargo test -p syauth --test e2e_real
+#   3. scripts/e2e-emulator-down.sh — kill emulator, remove .env.e2e
+#
+# Each per-test #[tokio::test] in tests/e2e_real.rs reads SYAUTH_E2E_REAL
+# at startup and skips with a single line when it's unset — so even an
+# accidental `cargo test -p syauth --test e2e_real` on a vanilla box is
+# safe.
+
+.PHONY: e2e-real
+e2e-real:
+ifeq ($(SYAUTH_E2E_REAL),1)
+	@./scripts/e2e-emulator-up.sh
+	@$(CARGO) test --package syauth --test e2e_real -- --nocapture --test-threads=1
+	@./scripts/e2e-emulator-down.sh
+else
+	@echo "==> e2e-real skipped: set SYAUTH_E2E_REAL=1 to run"
+endif
 
 # =============================================================================
 # Docker targets
