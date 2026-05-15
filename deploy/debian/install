@@ -1,0 +1,10 @@
+# dh_install file list for syauth v0.1.0.
+#
+# Most file paths are written directly by override_dh_auto_install in
+# debian/rules so they land with explicit modes (the .so and the
+# binary). This file lists the additional doc + license files that
+# debhelper installs with default permissions.
+README.md usr/share/doc/syauth/
+docs/security.md usr/share/doc/syauth/
+docs/android-setup.md usr/share/doc/syauth/
+LICENSE usr/share/doc/syauth/

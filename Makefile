@@ -36,6 +36,12 @@ help:
 	@echo "  e2e-real         - Run the SPEC 4.3 nine-case suite against a real Android emulator (gated on SYAUTH_E2E_REAL=1)"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-test      - Build and run tests in Docker"
+	@echo "  dist             - Produce target/syauth-<ver>.tar.gz via git archive"
+	@echo "  rpm              - Build the Fedora RPM under mock (skips cleanly without mock)"
+	@echo "  deb              - Build the Debian deb under pbuilder (skips cleanly without pbuilder)"
+	@echo "  release-apk      - Build + sign the Android release APK (skips without apksigner/keystore)"
+	@echo "  release          - Meta-target: dist + rpm + deb + release-apk (one-button release)"
+	@echo "  smoke-install    - Run docker-based install smoke (skips cleanly without docker)"
 
 # Install the syauth CLI binary into ~/.cargo/bin.
 .PHONY: install
@@ -203,6 +209,123 @@ ifeq ($(SYAUTH_E2E_REAL),1)
 else
 	@echo "==> e2e-real skipped: set SYAUTH_E2E_REAL=1 to run"
 endif
+
+# =============================================================================
+# Release packaging targets (S-021)
+# =============================================================================
+#
+# These targets produce the v0.1.0 shipping artifacts: a source tarball
+# (`make dist`), a Fedora RPM under mock (`make rpm`), a Debian deb
+# under pbuilder (`make deb`), a signed Android APK (`make release-apk`),
+# and a meta-target (`make release`) that chains all four. Each
+# sub-target gates on the tool it needs (`which mock`, `which pbuilder`,
+# `which apksigner`) and prints a one-line skip + exits 0 if absent, so
+# a developer box without release tooling can still run `make release`
+# and see what would happen on a CI runner.
+#
+# Single source of truth for the version + min-platform constants is
+# deploy/version.env; the values are duplicated here only to keep the
+# Make invocation self-contained.
+
+PACKAGE_VERSION ?= 0.1.0
+RPM_RELEASE     ?= 1
+DEB_REVISION    ?= 1
+DIST_PREFIX     ?= syauth-$(PACKAGE_VERSION)
+DIST_TARBALL    ?= target/$(DIST_PREFIX).tar.gz
+RPM_FILE        ?= target/syauth-$(PACKAGE_VERSION)-$(RPM_RELEASE).fc39.x86_64.rpm
+DEB_FILE        ?= target/syauth_$(PACKAGE_VERSION)-$(DEB_REVISION)_amd64.deb
+APK_FILE        ?= syauth-android/app/build/outputs/apk/release/syauth-$(PACKAGE_VERSION).apk
+
+## dist: Produce the source tarball under target/.
+.PHONY: dist
+dist:
+	@mkdir -p target
+	@echo "==> dist: writing $(DIST_TARBALL)"
+	@git archive --format=tar.gz --prefix=$(DIST_PREFIX)/ -o $(DIST_TARBALL) HEAD
+	@echo "==> dist: done ($$(du -h $(DIST_TARBALL) | cut -f1))"
+
+## rpm: Build the Fedora RPM under mock. Skips cleanly when mock is absent or the user is not in the mock group.
+##
+## Gate is two-stage: `command -v mock` must succeed AND the invoking
+## user must be in the `mock` group (mock(1) refuses to run otherwise,
+## and we want a one-line skip rather than a sudo password prompt).
+.PHONY: rpm
+rpm:
+	@set -eu; \
+	if ! command -v mock >/dev/null 2>&1; then \
+		echo "==> rpm: 'mock' not on PATH — skipping (install fedora-packager + add user to mock group)"; \
+		exit 0; \
+	fi; \
+	if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx mock; then \
+		echo "==> rpm: user not in 'mock' group — skipping (run 'sudo usermod -aG mock $$USER' then re-login)"; \
+		exit 0; \
+	fi; \
+	$(MAKE) --no-print-directory dist; \
+	echo "==> rpm: building under mock against fedora-39-x86_64"; \
+	mock -r fedora-39-x86_64 --buildsrpm \
+	    --spec deploy/fedora/syauth.spec \
+	    --sources target/ \
+	    --resultdir target/srpm/; \
+	mock -r fedora-39-x86_64 --rebuild target/srpm/syauth-$(PACKAGE_VERSION)-$(RPM_RELEASE).fc39.src.rpm \
+	    --resultdir target/; \
+	echo "==> rpm: artifact at $(RPM_FILE)"
+
+## deb: Build the Debian deb under pbuilder. Skips cleanly when pbuilder or dpkg-buildpackage is absent.
+.PHONY: deb
+deb:
+	@set -eu; \
+	if ! command -v pbuilder >/dev/null 2>&1; then \
+		echo "==> deb: 'pbuilder' not on PATH — skipping (apt install pbuilder devscripts debhelper)"; \
+		exit 0; \
+	fi; \
+	if ! command -v dpkg-buildpackage >/dev/null 2>&1; then \
+		echo "==> deb: 'dpkg-buildpackage' not on PATH — skipping (apt install dpkg-dev)"; \
+		exit 0; \
+	fi; \
+	$(MAKE) --no-print-directory dist; \
+	echo "==> deb: preparing build tree under target/deb-build/"; \
+	mkdir -p target/deb-build; \
+	tar -xzf $(DIST_TARBALL) -C target/deb-build/; \
+	cp -r deploy/debian target/deb-build/$(DIST_PREFIX)/debian; \
+	echo "==> deb: building under pbuilder"; \
+	( cd target/deb-build/$(DIST_PREFIX) && dpkg-buildpackage -us -uc -b ); \
+	mv target/deb-build/syauth_$(PACKAGE_VERSION)-$(DEB_REVISION)_*.deb target/ 2>/dev/null || true; \
+	echo "==> deb: artifact at $(DEB_FILE)"
+
+## release-apk: Build and sign the Android release APK. Skips cleanly without apksigner or keystore env var.
+.PHONY: release-apk
+release-apk:
+	@set -eu; \
+	if ! command -v apksigner >/dev/null 2>&1; then \
+		echo "==> release-apk: 'apksigner' not on PATH — skipping (install Android SDK build-tools)"; \
+		exit 0; \
+	fi; \
+	if [ -z "$${SYAUTH_RELEASE_KEYSTORE:-}" ]; then \
+		echo "==> release-apk: SYAUTH_RELEASE_KEYSTORE env var not set — skipping"; \
+		echo "    Set SYAUTH_RELEASE_KEYSTORE=/path/to/release.jks and SYAUTH_RELEASE_KEYSTORE_PASSWORD."; \
+		exit 0; \
+	fi; \
+	echo "==> release-apk: building unsigned release APK via Gradle"; \
+	( cd syauth-android && ./gradlew :app:assembleRelease ); \
+	echo "==> release-apk: signing with $$SYAUTH_RELEASE_KEYSTORE"; \
+	apksigner sign \
+	    --ks "$$SYAUTH_RELEASE_KEYSTORE" \
+	    --ks-pass "env:SYAUTH_RELEASE_KEYSTORE_PASSWORD" \
+	    --out "$(APK_FILE)" \
+	    syauth-android/app/build/outputs/apk/release/app-release-unsigned.apk; \
+	echo "==> release-apk: verifying signature"; \
+	apksigner verify --print-certs "$(APK_FILE)"; \
+	echo "==> release-apk: artifact at $(APK_FILE)"
+
+## release: Meta-target — dist + rpm + deb + release-apk. Each sub-target gates independently.
+.PHONY: release
+release: dist rpm deb release-apk
+	@echo "==> release: done (sub-targets that found their tools produced artifacts under target/)"
+
+## smoke-install: Run the docker-based install + version smoke. Skips cleanly without docker.
+.PHONY: smoke-install
+smoke-install:
+	@bash scripts/smoke-install.sh
 
 # =============================================================================
 # Docker targets

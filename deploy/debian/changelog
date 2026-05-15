@@ -1,0 +1,14 @@
+syauth (0.1.0-1) unstable; urgency=medium
+
+  * Initial release (Closes: #1).
+    - PAM cdylib pam_syauth.so installed under
+      /usr/lib/<multiarch>/security/ with mode 0644.
+    - syauth CLI installed under /usr/bin/ with mode 0755 and the
+      pair/list/revoke/status subcommands.
+    - postinst creates /var/lib/syauth/ with mode 0700; postrm is
+      deliberately silent so the bond store survives package
+      operations.
+    - Android companion shipped separately as a signed APK from the
+      same GitHub release; see /usr/share/doc/syauth/android-setup.md.
+
+ -- syauth contributors <noreply@anthropic.com>  Fri, 15 May 2026 00:00:00 +0000

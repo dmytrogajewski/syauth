@@ -1,0 +1,35 @@
+#!/bin/sh
+# postinst for syauth v0.1.0 (roadmap item S-021).
+#
+# Mirrors deploy/fedora/syauth.spec's %post scriptlet exactly: create
+# /var/lib/syauth/ with mode 0700 if absent, no-op if present. The
+# 0700 mode is pinned by specs/threat/THREAT-2026-05-15.md Finding
+# F-001 (bond directory must be root-only).
+#
+# This script is idempotent: re-running it on an existing install
+# does not destroy or widen state. It re-applies the mode, which is
+# what we want when an admin previously chmod'd the dir.
+
+set -e
+
+case "$1" in
+    configure)
+        # `install -d` is a no-op for an existing directory but DOES
+        # re-apply the mode. This is the intended behaviour: an
+        # operator who accidentally widened the bond dir gets it back
+        # to 0700 on every package operation.
+        install -d -m 0700 -o root -g root /var/lib/syauth
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # Nothing to roll back — we only created a directory.
+        :
+        ;;
+    *)
+        echo "postinst called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

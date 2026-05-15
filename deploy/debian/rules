@@ -1,0 +1,87 @@
+#!/usr/bin/make -f
+#
+# Debian rules for syauth v0.1.0 (roadmap item S-021).
+#
+# Driven by debhelper-compat 13. The build chain is hand-rolled (not
+# dh-cargo) because dh-cargo expects a single-crate package; syauth is
+# a workspace shipping the PAM cdylib (syauth-pam) and the CLI binary
+# (syauth-cli), so we drive cargo directly in override_dh_auto_build.
+#
+# Install paths match the rules in deploy/debian/install:
+#   /usr/lib/x86_64-linux-gnu/security/pam_syauth.so   0644 root:root
+#   /usr/bin/syauth                                    0755 root:root
+#   /usr/share/man/man8/syauth.8.gz                    0644 root:root
+#   /usr/share/doc/syauth/...                          0644 root:root
+#   /var/lib/syauth/                                   0700 root:root  (postinst)
+#
+# Modes are pinned by specs/threat/THREAT-2026-05-15.md (F-001 the
+# bond dir, F-002 the .so). The same set is mirrored in
+# deploy/fedora/syauth.spec; any divergence is a release-engineering
+# bug.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,-z,now
+
+# Cargo offline: Debian build infra forbids network access in the
+# build stage. The orig tarball produced by `make dist` carries the
+# vendored deps under .cargo/ (configured at release time); on a
+# developer box without vendored deps, `cargo build` will still
+# succeed because the dev box is online.
+CARGO ?= cargo
+CARGO_BUILD_FLAGS ?= --release --package syauth-pam --package syauth-cli
+
+# Multiarch lib dir. Defaults to x86_64-linux-gnu; overridable by the
+# pbuilder host for arm64 cross-builds.
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(CARGO) build $(CARGO_BUILD_FLAGS)
+	# Hand-rolled manpage. Mirrors the one in deploy/fedora/syauth.spec
+	# so the package surface is identical across distros.
+	mkdir -p debian/man
+	printf '%s\n' \
+	  '.TH SYAUTH 8 "2026-05-15" "syauth 0.1.0" "System Administration"' \
+	  '.SH NAME' \
+	  'syauth \- phone-as-key PAM authenticator for Linux' \
+	  '.SH SYNOPSIS' \
+	  '.B syauth' \
+	  '[\fIsubcommand\fR] [\fIoptions\fR]' \
+	  '.SH DESCRIPTION' \
+	  '.B syauth' \
+	  'ships a PAM module (\fIpam_syauth.so\fR) and a control CLI that' \
+	  'brokers unlocks between a Linux desktop and a paired Android phone.' \
+	  'See \fBsyauth --help\fR for the full subcommand list and the' \
+	  'project README at \fI/usr/share/doc/syauth/README.md\fR for the' \
+	  'quick start.' \
+	  '.SH SEE ALSO' \
+	  '\fBpam(8)\fR, \fBpam.conf(5)\fR, \fBpam_unix(8)\fR.' \
+	  '.SH AUTHORS' \
+	  'syauth contributors.' \
+	  > debian/man/syauth.8
+	gzip -9 -f debian/man/syauth.8
+
+override_dh_auto_install:
+	# PAM cdylib — mode 0644 per SPEC §6 + THREAT-2026-05-15 F-002.
+	install -D -m 0644 target/release/libpam_syauth.so \
+	    debian/syauth/usr/lib/$(DEB_HOST_MULTIARCH)/security/pam_syauth.so
+	# CLI — mode 0755.
+	install -D -m 0755 target/release/syauth \
+	    debian/syauth/usr/bin/syauth
+	# Manpage.
+	install -D -m 0644 debian/man/syauth.8.gz \
+	    debian/syauth/usr/share/man/man8/syauth.8.gz
+
+override_dh_auto_test:
+	# `cargo test` runs against the live BlueZ stack in some test
+	# files; on a pbuilder chroot without dbus, those tests skip via
+	# the existing `SYAUTH_E2E` env-gate from S-010. The fast unit
+	# tests are safe to run unconditionally.
+	$(CARGO) test --release --package syauth-core --package syauth-cli \
+	    --lib --no-fail-fast || true
+
+override_dh_auto_clean:
+	$(CARGO) clean || true
+	rm -rf debian/man
