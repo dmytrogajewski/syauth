@@ -42,6 +42,30 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # S-004 MAC: constant-time byte-slice equality via `ConstantTimeEq`.
 # Defends T-010 (timing side channels) per SPEC §6.
 subtle = { version = "2", default-features = false, features = ["std"] }
+# S-006 secret storage: `Zeroizing<Vec<u8>>` is the canonical RAII wiper
+# wrapping every secret payload returned from the `KeyStore` trait. The
+# `zeroize_derive` feature is not needed today — we only use the
+# `Zeroizing` smart pointer — but is listed defensively so future
+# additions of `#[derive(ZeroizeOnDrop)]` on a Drop type in this module
+# do not require touching Cargo.toml again.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# S-006 secret storage — Linux kernel keyring backend (primary).
+# Only compiled on Linux because the underlying `keyctl(2)` syscalls do
+# not exist on other Unixes. Gated via `[target.'cfg(...)'.dependencies]`
+# so non-Linux developer boxes can still `cargo check` syauth-core
+# without pulling a Linux-specific crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Safe wrapper around `keyctl(2)` syscalls; tiny dep tree, MIT/Apache.
+linux-keyutils = { version = "0.2", features = ["std"] }
+# DBus client for the libsecret/secret-service freedesktop API (fallback
+# when the kernel keyring is unreachable, e.g. containers without
+# CONFIG_KEYS). The `rt-tokio-crypto-rust` feature pairs zbus's tokio
+# runtime with the pure-Rust RustCrypto AES/HKDF impls — no OpenSSL
+# system dep. We consume the upstream `blocking` submodule from this
+# crate, but enabling a tokio reactor at compile time matches the rest
+# of the syauth workspace (PAM module already builds on tokio in S-008).
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
 # Property-based round-trip testing for `Frame::encode`/`Frame::decode`.

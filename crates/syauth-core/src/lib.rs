@@ -8,7 +8,7 @@
 //! - **S-003** — sliding LRU + TTL replay nonce cache.
 //! - **S-004** — Ed25519 signing + BLAKE3-keyed-hash MAC (this commit).
 //! - **S-005** — bond store TOML schema.
-//! - S-006 — kernel-keyring / libsecret abstraction.
+//! - **S-006** — kernel-keyring / libsecret `KeyStore` abstraction.
 //!
 //! See `specs/syauth/SPEC.md` for the protocol design,
 //! `specs/journeys/JOURNEY-S-002-protocol-framing.md` for the framing
@@ -24,6 +24,7 @@ pub mod bond;
 pub mod frame;
 pub mod mac;
 pub mod replay;
+pub mod secrets;
 pub mod sign;
 
 pub use bond::{
@@ -36,4 +37,9 @@ pub use frame::{
 };
 pub use mac::{BOND_KEY_BYTES, MAC_TAG_LEN, compute_tag, verify_tag};
 pub use replay::{Acceptance, DEFAULT_REPLAY_CAP, DEFAULT_REPLAY_TTL, ReplayCache};
+pub use secrets::{
+    BackendKind, InMemoryKeyStore, KEYRING_ID_PREFIX, KeyStore, LOG_LINE_KERNEL, LOG_LINE_SECRET_SERVICE, SECRET_SERVICE_ATTR_ID,
+    SECRET_SERVICE_ATTR_KIND, SECRET_SERVICE_ATTR_KIND_VALUE, SECRET_SERVICE_COLLECTION, SECRET_SERVICE_CONTENT_TYPE, SecretError, detect,
+    detect_with_logger,
+};
 pub use sign::{SIGNATURE_LEN, SIGNED_MESSAGE_PREFIX_LEN, Signature, SigningKey, VerifyError, VerifyingKey, sign_frame, verify_frame};
