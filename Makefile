@@ -30,6 +30,8 @@ help:
 	@echo "  deny             - Run cargo deny check (fatal)"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  bench            - Run benchmarks"
+	@echo "  android-aar      - Build syauth_mobile.aar (requires NDK_HOME)"
+	@echo "  android-aar-dry-run - Verify AAR pipeline without NDK"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-test      - Build and run tests in Docker"
 
@@ -92,6 +94,31 @@ deny:
 .PHONY: clean
 clean:
 	$(CARGO) clean
+
+# =============================================================================
+# Android AAR target (S-014)
+# =============================================================================
+#
+# Builds `crates/syauth-mobile/target/syauth_mobile.aar` containing the
+# .so for each Android ABI plus the UniFFI-generated Kotlin bindings.
+#
+# Requires (full build):
+#   - rustup targets for aarch64-linux-android and armv7-linux-androideabi
+#   - cargo-ndk:        cargo install cargo-ndk
+#   - uniffi-bindgen:   cargo install uniffi-bindgen --version 0.29
+#   - NDK_HOME env var pointing at an installed Android NDK
+#
+# Use `make android-aar-dry-run` on hosts without the NDK to validate the
+# pipeline is wired up correctly without producing the artifact.
+
+.PHONY: android-aar
+android-aar:
+	@bash scripts/build_aar.sh
+
+## android-aar-dry-run: Verify the AAR build pipeline without an NDK.
+.PHONY: android-aar-dry-run
+android-aar-dry-run:
+	@DRY_RUN=1 bash scripts/build_aar.sh
 
 # =============================================================================
 # Docker targets

@@ -1,0 +1,49 @@
+// syauth-mobile — UniFFI surface, roadmap item S-014.
+//
+// Mirrors `~/sources/prrr/prrr-mobile/src/mobile.udl` in structure: a
+// `namespace` block, a flat list of `[Throws=...]` functions, an `[Error]
+// interface` carrying typed variants, and a `dictionary` for the parsed
+// invite record. UniFFI 0.29's UDL parser does NOT support doc comments;
+// per-function documentation lives in `src/implementation.rs` (and is
+// propagated to the generated Kotlin/Swift via UniFFI 0.29).
+
+namespace syauth_mobile {
+  // Parse `syauth://invite?host=<name>&pubkey=<hex>` into an Invite record.
+  // Returns InvalidInvite on any structural defect.
+  [Throws=MobileError]
+  Invite parse_invite_uri(string uri);
+
+  // Verify a wire-format challenge frame using the per-bond BLAKE3 key.
+  // Returns the challenge payload (the bytes the phone must sign) on
+  // success, or VerifyFailed / BadFrame / InvalidKey on failure.
+  [Throws=MobileError]
+  sequence<u8> verify_challenge_frame(sequence<u8> bond_key, sequence<u8> frame_bytes);
+
+  // Sign the wire-format frame body with the phone's Ed25519 secret key.
+  // Returns the 64-byte Ed25519 signature.
+  [Throws=MobileError]
+  sequence<u8> sign_challenge_response(sequence<u8> signing_key, sequence<u8> frame_bytes);
+
+  // Derive the 4-word emoji-prefixed OOB code for `bond_key`. Mirrors
+  // `crates/syauth-cli/src/oob.rs::oob_code_for_bond`.
+  [Throws=MobileError]
+  sequence<string> oob_code_for_bond(sequence<u8> bond_key);
+};
+
+// Typed error variants surfaced to Kotlin/Swift. Every `reason` is a
+// human-readable, opaque string — NEVER a secret byte (defends T-010 in
+// SPEC §6 against side-channel info leaks).
+[Error]
+interface MobileError {
+  InvalidInvite(string reason);
+  InvalidKey(string reason);
+  BadFrame(string reason);
+  VerifyFailed(string reason);
+  SignFailed(string reason);
+};
+
+// Parsed invite record.
+dictionary Invite {
+  string host_name;
+  sequence<u8> host_pubkey;
+};

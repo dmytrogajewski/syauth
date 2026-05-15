@@ -1,8 +1,16 @@
 # syauth-mobile — UniFFI-exported surface consumed by the Android companion.
 #
-# Roadmap item S-014. Mirrors `~/sources/prrr/prrr-mobile` (crate-type
-# cdylib+staticlib+lib, UniFFI 0.29 build-dependency). S-001 only ships the
-# placeholder library so the workspace resolves; UniFFI itself lands in S-014.
+# Roadmap item S-014. Mirrors `~/sources/prrr/prrr-mobile`:
+#
+#   [lib] crate-type     = ["cdylib", "staticlib", "lib"]
+#   [build-dependencies] uniffi = { version = "0.29", features = ["build"] }
+#
+# The four UDL-exported entry points (`parse_invite_uri`,
+# `verify_challenge_frame`, `sign_challenge_response`, `oob_code_for_bond`)
+# are thin re-exports over `syauth-core`, with input validation done
+# fallibly so no panic ever crosses the FFI boundary. See
+# `specs/journeys/JOURNEY-S-014-mobile-uniffi-surface.md` for the audit
+# trail of every deviation from the prrr-mobile pattern.
 
 [package]
 name = "syauth-mobile"
@@ -13,7 +21,62 @@ license.workspace = true
 description = "syauth shared mobile surface, exported to Kotlin via UniFFI"
 
 [lib]
+name = "syauth_mobile"
 path = "src/lib.rs"
+# Mirrors prrr-mobile: cdylib for Android JNI, staticlib for iOS XCFramework,
+# lib for downstream Rust callers (the smoke example, future Rust integration
+# tests). Pinned in `crates/syauth-mobile/src/mobile.udl` as the only output
+# surface UniFFI 0.29 expects.
+crate-type = ["cdylib", "staticlib", "lib"]
 
+[dependencies]
+# UniFFI runtime — `0.29` per prrr-mobile. The `cli` feature (which would
+# pull in `clap` and a `bin/uniffi-bindgen` entry point) is intentionally
+# omitted because we never run the CLI from inside this crate; the AAR
+# build script invokes a separately-installed `uniffi-bindgen` binary.
+uniffi = "0.29"
+
+# Typed error with `#[error("...")]` Display impls. Every variant carries a
+# `reason: String` rather than a structured payload because:
+#   - UniFFI 0.29's UDL `[Error]` interface marshals associated data
+#     positionally only (Rust enum variant fields become tuple struct args
+#     on the Kotlin side);
+#   - the `reason` strings are stable enough for a Kotlin caller to do
+#     `e.reason.contains("pubkey")` without breaking on patch releases;
+#   - no secret byte EVER appears in the reason string — see the SPEC §6
+#     T-010 timing-side-channel rule (mirrored at the source level by the
+#     `no_secret_bytes_in_error_strings` test).
+thiserror = "2"
+
+# `syauth-core` re-exports `Frame`, `compute_tag`, `verify_tag`,
+# `sign_frame`, `verify_frame`, and the typed errors we wrap into
+# `MobileError`. Pinned by path so the workspace resolves to one version.
+syauth-core = { path = "../syauth-core" }
+
+# HKDF-SHA256 for `oob_code_for_bond`. The version pins match
+# `crates/syauth-cli/Cargo.toml` so the workspace resolves to a single
+# `hkdf = 0.13` and `sha2 = 0.11` in Cargo.lock — important because the
+# OOB derivation MUST produce byte-identical output across the desktop
+# (`syauth-cli`) and the phone (`syauth-mobile`) sides per SPEC §4.1.
+hkdf = "0.13"
+sha2 = "0.11"
+
+# Lowercase-hex decode for `parse_invite_uri`'s `pubkey=<hex>` query param.
+# Already in the workspace via `syauth-core/Cargo.toml` dev-dependencies
+# (KAT loader), so adding it here introduces no new audit surface.
+hex = "0.4"
+
+[build-dependencies]
+# Mirrors prrr-mobile: same crate, same version, same `features = ["build"]`.
+# The build feature pulls in the UDL parser + scaffolding generator that
+# `build.rs` invokes.
+uniffi = { version = "0.29", features = ["build"] }
+
+# The workspace `[workspace.lints.rust] unsafe_code = "deny"` rule is NOT
+# overridden at the crate `[lints]` level. Instead, `src/lib.rs` carries a
+# crate-level `#![allow(unsafe_code)]` with a SAFETY comment pinning UniFFI
+# as the sole producer of `unsafe` blocks (mirrors prrr-mobile's pattern,
+# though prrr-mobile comments-out the workspace deny in Cargo.toml; we keep
+# the deny strict and override at the source file so reviewers see it).
 [lints]
 workspace = true
