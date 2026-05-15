@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Roadmap item S-015 — minimal theme. Material light no-action-bar matches
+  prrr-android's pattern. Compose drives all real theming via MaterialTheme
+  in MainActivity; this XML theme only exists so the Application+Activity
+  attach correctly before setContent.
+-->
+<resources>
+    <style name="Theme.SyauthAndroid" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

@@ -32,6 +32,7 @@ help:
 	@echo "  bench            - Run benchmarks"
 	@echo "  android-aar      - Build syauth_mobile.aar (requires NDK_HOME)"
 	@echo "  android-aar-dry-run - Verify AAR pipeline without NDK"
+	@echo "  android-test     - Run :app:connectedAndroidTest (skips cleanly without emulator/AAR)"
 	@echo "  docker-build     - Build Docker image"
 	@echo "  docker-test      - Build and run tests in Docker"
 
@@ -119,6 +120,60 @@ android-aar:
 .PHONY: android-aar-dry-run
 android-aar-dry-run:
 	@DRY_RUN=1 bash scripts/build_aar.sh
+
+# =============================================================================
+# Android scaffold target (S-015)
+# =============================================================================
+#
+# Runs the instrumented Compose test that asserts the OOB string rendered
+# via the UniFFI -> JNA -> Rust pipeline. Skips cleanly on hosts without
+# the artifacts or without an emulator so CI is honest.
+#
+# Three preflight checks before delegating to Gradle, each with a clean
+# skip path (exit 0 with an actionable message):
+#
+#   1. AAR present?               -> scripts/check_android_aar.sh
+#   2. Emulator connected?        -> adb devices | grep -E 'device$$'
+#   3. No hand-written JNI?       -> grep -rn 'external fun' syauth-android/
+
+ANDROID_DIR ?= syauth-android
+
+.PHONY: android-test
+android-test:
+	@set -eu; \
+	echo "==> S-015 android-test: preflight"; \
+	if ! bash scripts/check_android_aar.sh; then \
+		echo "==> android-test: AAR missing — skipping (exit 0)"; \
+		exit 0; \
+	fi; \
+	echo "==> Asserting no hand-written JNI under $(ANDROID_DIR)/"; \
+	if grep -rn 'external fun' $(ANDROID_DIR)/ >/dev/null 2>&1; then \
+		echo "ERROR: hand-written JNI detected (DoD #4 violation):"; \
+		grep -rn 'external fun' $(ANDROID_DIR)/; \
+		exit 1; \
+	fi; \
+	if ! command -v adb >/dev/null 2>&1; then \
+		echo "==> adb not on PATH — skipping (install Android SDK platform-tools)"; \
+		exit 0; \
+	fi; \
+	if ! adb devices 2>/dev/null | awk 'NR>1 && $$2=="device"{found=1} END{exit found?0:1}'; then \
+		echo "==> (no Android emulator connected — skipping)"; \
+		exit 0; \
+	fi; \
+	echo "==> Running ./gradlew :app:connectedAndroidTest"; \
+	( cd $(ANDROID_DIR) && ./gradlew :app:connectedAndroidTest ); \
+	echo "==> Asserting debug APK is < 10 MB"; \
+	apk_path="$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"; \
+	if [ -f "$$apk_path" ]; then \
+		size_k=$$(du -k "$$apk_path" | cut -f1); \
+		if [ "$$size_k" -gt 10240 ]; then \
+			echo "ERROR: debug APK exceeds 10 MB ($$size_k KB)"; exit 1; \
+		else \
+			echo "==> Debug APK size: $$size_k KB (< 10 MB budget)"; \
+		fi; \
+	else \
+		echo "==> Debug APK not present yet ($$apk_path) — Gradle may have skipped assembleDebug"; \
+	fi
 
 # =============================================================================
 # Docker targets

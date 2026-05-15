@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Roadmap item S-015 — minimal manifest for the hello-world scaffold.
+
+  ZERO permissions are declared on purpose. The hello-world calls a pure
+  function (HKDF + table lookup) and renders a Text composable; no network,
+  no Bluetooth, no biometric, no notifications. The intentionally-omitted
+  permissions and their owning roadmap items, audited in
+  specs/journeys/JOURNEY-S-015-android-scaffold.md:
+
+    - INTERNET                          — never (BLE-only protocol)
+    - BLUETOOTH_CONNECT / SCAN / ADVERTISE — S-018 (CompanionDeviceService)
+    - POST_NOTIFICATIONS                — S-018 (background bridge)
+    - USE_BIOMETRIC                     — S-017 (BiometricPrompt)
+
+  Declaring them now would mis-state the app's true surface area, mislead
+  the manifest reviewer, and let a future agent ship a screen that quietly
+  uses a permission S-015 silently granted.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SyauthAndroid"
+        tools:targetApi="31">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SyauthAndroid">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Roadmap item S-015 — hello-world app label. -->
+<resources>
+    <string name="app_name">syauth</string>
+</resources>
