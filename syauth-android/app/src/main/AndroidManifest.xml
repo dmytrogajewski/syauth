@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Roadmap item S-016 — manifest carries the Bluetooth permissions the
-  pairing screen needs to scan and bond.
+  Roadmap items S-016 (BLE pairing) and S-017 (BiometricPrompt) — manifest
+  carries the runtime permissions the pairing screen and the Approve screen
+  need.
 
   Permission contract (audited in
   specs/journeys/JOURNEY-S-016-android-pairing.md "Bluetooth Permission
-  Contract"):
+  Contract" and specs/journeys/JOURNEY-S-017-android-approve.md):
 
     - BLUETOOTH_SCAN     — scan for advertising peers (S-016 Phase 2).
                            Runtime permission on API 31+.
@@ -19,13 +20,15 @@
     - ACCESS_FINE_LOCATION (maxSdkVersion=30) — legacy: BLE scans on
                            API 26-30 require location. The cap prevents
                            the dialog from showing on API 31+.
+    - USE_BIOMETRIC      — gates the Keystore-backed signing key on a
+                           fresh user gesture via BiometricPrompt
+                           (S-017 Approve screen).
 
   Explicitly NOT declared (still owned by future roadmap items):
     - INTERNET             — never (BLE-only protocol per SPEC §3.4).
     - BLUETOOTH_ADVERTISE  — never (desktop advertises; phone scans —
                               SPEC §3.2 D8, presence-tracking defense).
     - POST_NOTIFICATIONS   — S-018 (CompanionDeviceService).
-    - USE_BIOMETRIC        — S-017 (BiometricPrompt).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -45,6 +48,12 @@
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
+
+    <!--
+      S-017: BiometricPrompt gate for the Keystore-backed signing key.
+      Required by androidx.biometric:biometric 1.2.0-alpha05.
+    -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
         android:allowBackup="false"

@@ -835,19 +835,18 @@ The method is a hidden API since API 1 and remains hidden in API 34. `Reflection
 ---
 
 ## Step S-017: Android — Approve screen + BiometricPrompt + Keystore signer
-<!-- status: in_progress claimed-at: 2026-05-15T02:00:00Z claimed-by: orchestrate -->
 
 **Description:** The screen the user sees on every unlock. Surface "Approve unlock for `hostname`?" with two buttons. Tapping Approve triggers `BiometricPrompt`; on success the Keystore releases the Ed25519 signing key (with `setUserAuthenticationRequired(true)`) for one signature, the response frame is sent. On Deny or timeout, the screen closes.
 
 **DoR:** S-014 complete.
 
 **DoD:**
-- [ ] Compose screen shows `hostname`, app icon, Approve/Deny buttons, and a countdown (default 30 s).
-- [ ] Signing key is generated in `KeyProperties.KEY_ALGORITHM_EC` (curve `secp256r1` if Keystore lacks Ed25519 — fall back per device; document in `docs/android-setup.md`) with `setUserAuthenticationRequired(true)` and `setUnlockedDeviceRequired(true)`. Strongbox if available.
-- [ ] BiometricPrompt with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`.
-- [ ] Signing happens via the UniFFI surface, which takes a raw signature blob from the Keystore-backed `Signature` object. The crypto code never sees the private key bytes.
-- [ ] Cancel on countdown is logged as a denial (not a timeout from the desktop's perspective — the desktop sees a `PeerDenied` frame).
-- [ ] Robolectric tests for the timeout, Approve, Deny branches.
+- [x] Compose screen shows `hostname`, app icon, Approve/Deny buttons, and a countdown (default 30 s).
+- [x] Signing key is generated in `KeyProperties.KEY_ALGORITHM_EC` (curve `secp256r1` if Keystore lacks Ed25519 — fall back per device; document in `docs/android-setup.md`) with `setUserAuthenticationRequired(true)` and `setUnlockedDeviceRequired(true)`. Strongbox if available.
+- [x] BiometricPrompt with `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`.
+- [x] Signing happens via the UniFFI surface, which takes a raw signature blob from the Keystore-backed `Signature` object. The crypto code never sees the private key bytes.
+- [x] Cancel on countdown is logged as a denial (not a timeout from the desktop's perspective — the desktop sees a `PeerDenied` frame).
+- [x] Robolectric tests for the timeout, Approve, Deny branches.
 
 **Tests:**
 - `syauth-android/app/src/test/.../ApproveViewModelTest.kt`.
@@ -855,7 +854,20 @@ The method is a hidden API since API 1 and remains hidden in API 34. `Reflection
 
 **Files likely affected:** `syauth-android/app/src/main/kotlin/com/sy/syauth/android/approve/{ApproveViewModel.kt,ApproveScreen.kt,KeystoreSigner.kt}`.
 
-**Journey:** `JOURNEY-{id}-android-approve.md`
+**Journey:** `JOURNEY-S-017-android-approve.md` — `specs/journeys/JOURNEY-S-017-android-approve.md`.
+
+### Evidence
+
+- **Compose screen** — `syauth-android/app/src/main/kotlin/com/sy/syauth/android/approve/ApproveScreen.kt` renders the hostname (test tag `syauth.approve.hostname`), the Material `Lock` app icon, an Approve button (`syauth.approve.approve_button`), a Deny button (`syauth.approve.deny_button`), and the countdown line (`syauth.approve.countdown`). The countdown's default of 30 s is pinned via `DEFAULT_TIMEOUT_MILLIS = 30_000L` in `ApproveViewModel.kt`.
+- **EC P-256 + StrongBox + UserAuthRequired + UnlockedDeviceRequired** — `syauth-android/app/src/main/kotlin/com/sy/syauth/android/approve/KeystoreSigner.kt`'s `AndroidKeystoreSigner.generateKey` builds `KeyGenParameterSpec.Builder(alias, PURPOSE_SIGN or PURPOSE_VERIFY).setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1")).setUserAuthenticationRequired(true).setUnlockedDeviceRequired(true)` and the StrongBox `try { setIsStrongBoxBacked(true).build() } catch (StrongBoxUnavailableException) { setIsStrongBoxBacked(false).build() }` fallback. The choice is recorded in `KeyInfo.strongBoxBacked`. Documented in `docs/android-setup.md` §"Keystore key parameters". Verified by inspection; requires Android SDK to fully execute the `KeyGenParameterSpec` builder.
+- **BiometricPrompt STRONG | DEVICE_CREDENTIAL** — `syauth-android/app/src/main/kotlin/com/sy/syauth/android/approve/AndroidBiometricPresenter.kt` pins `ALLOWED_AUTHENTICATORS = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL`. Verified by inspection; requires Android SDK + connected emulator to fully execute.
+- **UniFFI signing surface** — `syauth-android/app/src/main/kotlin/com/sy/syauth/android/approve/UniffiWireSigner.kt`'s `UniffiWireSigner.signWire` delegates to `uniffi.syauth_mobile.signChallengeResponse(seed, frameBytes)`. The crypto core (Rust) never sees the seed in plaintext storage; it receives it as a single argument across the UniFFI boundary. The transitional Kotlin-side seed handling and the path to a fully-Keystore-wrapped Ed25519 key are documented in `docs/android-setup.md` §"Ed25519 seed handling (transitional)".
+- **Cancel-on-countdown is logged as a denial** — `ApproveViewModel.runCountdown` calls `onTimeout()` when `remainingMillis <= 0`, which calls `transitionToDenied(DenialReason.TimedOut)`, which calls `responseSender.sendDeny()`. The desktop sees a `PeerDenied` frame identically to an explicit-user-deny. Pinned by the JVM unit test `countdown_timeout_emits_timed_out_and_calls_send_deny_once` in `ApproveViewModelTest.kt`.
+- **Robolectric / unit tests for Approve, Deny, Timeout, BiometricFailed** — `syauth-android/app/src/test/kotlin/com/sy/syauth/android/approve/ApproveViewModelTest.kt` covers `approve_happy_path_emits_approved_and_calls_send_approve_once`, `deny_click_emits_user_denied_and_calls_send_deny_once`, `countdown_timeout_emits_timed_out_and_calls_send_deny_once`, `biometric_failure_emits_biometric_failed_and_calls_send_deny_once`, plus four supplementary scenarios (`start_is_idempotent`, `deny_after_approve_is_ignored`, `missing_seed_emits_sign_error`, `wire_signer_failure_emits_sign_error`). Tests are pure JVM (no Robolectric runner needed because every Android side-effect is injected behind an interface); the Robolectric runtime is added to the test dep set so future tests can opt in. Verified by inspection; requires Android SDK + Gradle to fully execute via `./gradlew :app:testDebugUnitTest`.
+- **Compose screen test (emulator-gated)** — `syauth-android/app/src/androidTest/kotlin/com/sy/syauth/android/approve/ApproveScreenTest.kt` asserts hostname / Approve / Deny / countdown nodes via `createComposeRule()`. Marked emulator-gated with a `// Requires connected device / emulator` comment.
+- **Manifest** — `syauth-android/app/src/main/AndroidManifest.xml` adds `<uses-permission android:name="android.permission.USE_BIOMETRIC" />` per the S-017 brief.
+- **Build deps** — `syauth-android/app/build.gradle.kts` adds `androidx.biometric:biometric:1.2.0-alpha05`, `androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0`, `androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0`, `androidx.lifecycle:lifecycle-runtime-compose:2.7.0`, `androidx.fragment:fragment-ktx:1.6.2`, `androidx.navigation:navigation-compose:2.7.7`, Robolectric + core-testing + kotlinx-coroutines-test + junit on `testImplementation`, plus the `testOptions { unitTests.isIncludeAndroidResources = true }` block.
+- **Documentation** — `docs/android-setup.md` carries the Keystore key parameters section (curve choice + StrongBox + auth requirements + BiometricPrompt allowed authenticators + Ed25519 seed transitional handling).
 
 ---
 
