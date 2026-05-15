@@ -736,7 +736,6 @@ Plus: `tc10_setcred_returns_pam_success` (DoD #4), `tc12_last_log_appends_one_li
 ---
 
 ## Step S-015: Android scaffold — Gradle + Compose + hello-world consuming the AAR
-<!-- status: in_progress claimed-at: 2026-05-15T01:30:00Z claimed-by: orchestrate -->
 
 **Description:** Bootstrap `syauth-android/` by copying the structure of `~/sources/prrr/prrr-android/`: same `build.gradle.kts` layout, same minSdk 26 / targetSdk 34 / JVM 17 / Kotlin 1.9, JNA dependency, and a single Compose screen that calls `oobCodeForBond(...)` from the AAR and renders the result. No BT yet — proves the toolchain.
 
