@@ -1,0 +1,20 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"--help\"])"
+---
+Phone-as-key unlock for Linux PAM
+
+Usage: syauth <COMMAND>
+
+Commands:
+  pair           Pair a phone with this desktop. Runs LE Secure Connections numeric comparison followed by the app-level 4-word OOB confirmation, then writes the bond on `[y/N]` = Y
+  list           Print the bonds file as TSV: id\tname\tstatus\tcreated_at
+  revoke         Mark a bond as revoked (idempotent). The bond record itself is preserved so the audit trail survives; the PAM module refuses unlock attempts from revoked peers
+  status         Print adapter state, advertising state, bond count, and the most recent unlock outcome. Read-only — never writes to the host
+  install-pam    Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snapshot of the original
+  uninstall-pam  Restore a PAM service file from its `.bak` and remove the bak
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

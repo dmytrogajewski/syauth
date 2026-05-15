@@ -1,0 +1,11 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"list\", \"--help\"])"
+---
+Print the bonds file as TSV: id\tname\tstatus\tcreated_at
+
+Usage: syauth list [OPTIONS]
+
+Options:
+      --bond-dir <BOND_DIR>  Directory holding the bonds file. Defaults to SPEC's `/var/lib/syauth/`. Tests inject a tempdir [default: /var/lib/syauth]
+  -h, --help                 Print help

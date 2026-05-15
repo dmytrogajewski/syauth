@@ -1,0 +1,13 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"revoke\", \"--help\"])"
+---
+Mark a bond as revoked (idempotent). The bond record itself is preserved so the audit trail survives; the PAM module refuses unlock attempts from revoked peers
+
+Usage: syauth revoke [OPTIONS] --id <ID>
+
+Options:
+      --id <ID>              Bond peer id (32-char lowercase hex from [`syauth_core::peer_id_from_pubkey`]). Required
+      --bond-dir <BOND_DIR>  Directory holding the bonds file. Defaults to SPEC's `/var/lib/syauth/`. Tests inject a tempdir [default: /var/lib/syauth]
+      --reason <REASON>      Operator-supplied reason for the revocation; written to the bond's status field. Defaults to [`DEFAULT_REVOKE_REASON`] [default: "manual: syauth revoke"]
+  -h, --help                 Print help

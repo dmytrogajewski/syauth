@@ -1,0 +1,15 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"pair\", \"--help\"])"
+---
+Pair a phone with this desktop. Runs LE Secure Connections numeric comparison followed by the app-level 4-word OOB confirmation, then writes the bond on `[y/N]` = Y
+
+Usage: syauth pair [OPTIONS]
+
+Options:
+      --adapter <ADAPTER>            BlueZ adapter id (e.g. `hci0`) [default: hci0]
+      --peer <PEER>                  Restrict the picker to peers whose advertised name contains this substring. With `--yes`, the call fails with `AmbiguousPeer` if more than one peer matches
+      --timeout-secs <TIMEOUT_SECS>  `ProvisionalBonded → Revoked` deadline in seconds. Default 60 [default: 60]
+      --bond-dir <BOND_DIR>          Directory holding the bonds file. Defaults to SPEC's `/var/lib/syauth/`. Tests inject a tempdir [default: /var/lib/syauth]
+      --yes                          Skip the interactive `[y/N]` OOB confirmation prompt. Tests only. Does NOT skip any safety-relevant gate (adapter LESC check, ambiguous peer check)
+  -h, --help                         Print help

@@ -1,0 +1,13 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"uninstall-pam\", \"--help\"])"
+---
+Restore a PAM service file from its `.bak` and remove the bak
+
+Usage: syauth uninstall-pam [OPTIONS] --service <SERVICE>
+
+Options:
+      --service <SERVICE>  PAM service to uninstall from
+      --pam-dir <PAM_DIR>  PAM service directory. Defaults to `/etc/pam.d`. Tests inject a tempdir [default: /etc/pam.d]
+      --yes                Skip the interactive confirmation prompt
+  -h, --help               Print help

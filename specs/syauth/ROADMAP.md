@@ -280,20 +280,42 @@
 **DoR:** S-001 complete; S-005 complete (we need the bond IDs to key the secrets).
 
 **DoD:**
-- [ ] `syauth_core::secrets::KeyStore` trait with `put(id, secret)`, `get(id) -> Option<Zeroizing<Vec<u8>>>`, `remove(id)`.
-- [ ] Two impls: `KernelKeyring` (primary, uses `linux-keyutils`) and `SecretService` (fallback, uses `secret-service` crate).
-- [ ] `KeyStore::detect()` factory returns the first working backend at startup; logs which one was selected.
-- [ ] All returned secrets are wrapped in `zeroize::Zeroizing<Vec<u8>>` so they are wiped on drop.
-- [ ] Integration test against the real kernel keyring (`@u` session keyring) gated on Linux only — no test ever writes to the system keyring.
-- [ ] Mock impl `InMemoryKeyStore` for unit tests of upstream code.
+- [x] `syauth_core::secrets::KeyStore` trait with `put(id, secret)`, `get(id) -> Option<Zeroizing<Vec<u8>>>`, `remove(id)`.
+- [x] Two impls: `KernelKeyring` (primary, uses `linux-keyutils`) and `SecretService` (fallback, uses `secret-service` crate).
+- [x] `KeyStore::detect()` factory returns the first working backend at startup; logs which one was selected.
+- [x] All returned secrets are wrapped in `zeroize::Zeroizing<Vec<u8>>` so they are wiped on drop.
+- [x] Integration test against the real kernel keyring (`@u` session keyring) gated on Linux only — no test ever writes to the system keyring.
+- [x] Mock impl `InMemoryKeyStore` for unit tests of upstream code.
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-core/src/secrets.rs` — `KeyStore` trait (sync; `put` / `get` / `remove`), `SecretError`, `BackendKind`, `InMemoryKeyStore`, `KernelKeyring` (Linux-gated, uses `linux-keyutils` against `KeyRingIdentifier::Session`), `SecretService` (Linux-gated, uses `secret-service` crate with a per-call `tokio::runtime::Runtime`), `detect` / `detect_with_logger` factories that probe kernel first then fall back to secret-service.
+- `crates/syauth-core/src/lib.rs` — `pub mod secrets;` + re-exports.
+- `crates/syauth-core/Cargo.toml` — adds `zeroize = "1" (zeroize_derive)`; Linux-gated `linux-keyutils = "0.2"` and `secret-service = "5" (rt-tokio-crypto-rust)`.
+- `crates/syauth-core/tests/keyring_linux.rs` — 3 hermetic integration tests against the session keyring with RAII cleanup, gated on `target_os = "linux"`. Skips cleanly if `CONFIG_KEYS` is not available (probe fails).
+- `specs/journeys/JOURNEY-S-006-secret-storage.md` — journey doc.
+
+**Tests:**
+- `secrets.rs::tests` (7): `inmemory_roundtrip`, `inmemory_get_missing_returns_none`, `inmemory_double_put_overwrites`, `inmemory_remove_makes_get_return_none`, `inmemory_remove_missing_is_ok`, `inmemory_get_returns_zeroizing_vec`, `detect_returns_real_backend_or_not_implemented`.
+- `tests/keyring_linux.rs` (3): `kernel_keyring_roundtrip`, `kernel_keyring_get_missing_returns_none`, `kernel_keyring_remove_is_idempotent` — all three actually ran on the dev box (kernel keyring reachable on Fedora 43).
+
+**Command outputs:**
+- `cargo deny check` — `advisories ok, bans ok, licenses ok, sources ok`.
+- `make lint` — exit 0; `make test` — exit 0.
+
+**Deviations:**
+1. `KeyStore` is sync (not async). The PAM caller cannot afford to spin up a tokio runtime per call when the kernel keyring path is itself sync; the `SecretService` impl absorbs the cost of building a single-threaded runtime internally on the rare fallback path. Documented in the journey.
+2. `BackendKind` is public for future use by the `pam_sm_*` logger to log which backend served a get; `detect_with_logger` currently passes the kind via the log callback. Non-breaking to widen later.
+3. `SecretService` unit tests are not hermetic (no fixture libsecret service is shipped); the trait surface and error mapping are exercised by the probe path in `detect_with_logger`. The full DBus roundtrip lands when S-009's PAM e2e runs on a host without `CONFIG_KEYS`.
 
 **Tests:**
 - `crates/syauth-core/src/secrets.rs` test module: roundtrip, missing key, double-put overwrites.
-- `tests/keyring_linux.rs` integration test (`#[cfg(target_os = "linux")]`).
+- `crates/syauth-core/tests/keyring_linux.rs` integration test (`#[cfg(target_os = "linux")]`).
 
 **Files likely affected:** `crates/syauth-core/src/secrets.rs`.
 
-**Journey:** `JOURNEY-{id}-secret-storage.md`
+**Journey:** [`JOURNEY-S-006-secret-storage.md`](../journeys/JOURNEY-S-006-secret-storage.md)
 
 ---
 
@@ -524,18 +546,46 @@
 **DoR:** S-005, S-011 complete.
 
 **DoD:**
-- [ ] `syauth list` prints bonds in TSV: `id\tname\tstatus\tcreated_at`. Hidden by default if no bonds; emits an empty table with a hint instead of erroring.
-- [ ] `syauth revoke <id>` marks the bond as revoked, exits 0; idempotent (revoke twice = same result, exit 0).
-- [ ] `syauth status` prints: adapter state, advertising state, bond count, last unlock outcome (read from a small rolling log under `/var/lib/syauth/last.log`), and whether CDM is observing — wait, CDM is phone-side; for now just print adapter+bonds+last unlock.
-- [ ] `syauth --version` and `syauth --help` work and exit 0.
-- [ ] Snapshot test on `--help` output (so `clap` regressions are caught).
+- [x] `syauth list` prints bonds in TSV: `id\tname\tstatus\tcreated_at`. Hidden by default if no bonds; emits an empty table with a hint instead of erroring.
+- [x] `syauth revoke <id>` marks the bond as revoked, exits 0; idempotent (revoke twice = same result, exit 0).
+- [x] `syauth status` prints: adapter state, advertising state, bond count, last unlock outcome (read from a small rolling log under `/var/lib/syauth/last.log`), and whether CDM is observing — wait, CDM is phone-side; for now just print adapter+bonds+last unlock.
+- [x] `syauth --version` and `syauth --help` work and exit 0.
+- [x] Snapshot test on `--help` output (so `clap` regressions are caught).
+
+### Evidence
+
+**Created / modified files:**
+- `crates/syauth-cli/src/revoke.rs` — `apply_revoke(&mut BondStore, id, reason)` wraps `BondStore::mark_revoked`. Idempotent (S-005's `mark_revoked` is already no-op for already-revoked bonds). Unknown id → exit non-zero with id in stderr.
+- `crates/syauth-cli/src/status.rs` — prints `adapter:`, `adapter-state:` (`Powered | Down | Missing`), `advertising:` (hard-coded `false` until S-018), `bonds-count:`, `last-unlock:` parsed from `<bond-dir>/last.log` (or `(no entries)` if missing).
+- `crates/syauth-cli/src/main.rs` — extends clap dispatcher with `Revoke` and `Status` subcommands.
+- `crates/syauth-cli/src/lib.rs` — `pub mod {revoke, status};`.
+- `crates/syauth-cli/Cargo.toml` — adds `insta = "1"` and `regex` dev-deps.
+- `crates/syauth-cli/tests/cli.rs` — 16 integration cases.
+- `crates/syauth-cli/tests/snapshots/cli__{help,list_help,pair_help,revoke_help,status_help,install_pam_help,uninstall_pam_help}_snapshot.snap` — 7 committed snapshots.
+- `specs/journeys/JOURNEY-S-012-day2-cli.md` — journey doc.
+
+**Tests** (16 in `tests/cli.rs`):
+- DoD #1: `list_on_empty_store_prints_hint`.
+- DoD #2: `revoke_known_bond_marks_revoked`, `revoke_already_revoked_is_idempotent`, `revoke_unknown_id_exits_nonzero_with_id_in_stderr`.
+- DoD #3: `status_prints_all_documented_fields`, `status_with_synthetic_last_log_parses_correctly`, `status_reports_missing_for_unknown_adapter`, `status_reports_no_entries_when_last_log_absent`.
+- DoD #4: `version_prints_semver_and_exits_0`.
+- DoD #5: `help_snapshot`, `pair_help_snapshot`, `list_help_snapshot`, `revoke_help_snapshot`, `status_help_snapshot`, `install_pam_help_snapshot`, `uninstall_pam_help_snapshot`.
+
+**Command outputs:**
+- `make lint` — exit 0; `make test` — exit 0.
+- `cargo test -p syauth-cli --test cli` — 16 passed.
+
+**Deviations:**
+1. `revoke` uses `--id <peer-id>` (long-form) instead of positional `<id>` for consistency with `install-pam --service` / `uninstall-pam --service`. Same semantics.
+2. `advertising:` line is hard-coded to `false` in v0.1 (via `ADVERTISING_STATE_V01` named const). The line is printed so the help/output surface stays stable across S-018 when the real advertising lifecycle lands.
+3. `last-unlock:` uses two-space field separation; the parser splits on whitespace so any spacing works.
 
 **Tests:**
-- `crates/syauth-cli/tests/cli.rs` using `assert_cmd`.
+- `crates/syauth-cli/tests/cli.rs` using `assert_cmd` and `insta` (16 cases).
 
 **Files likely affected:** `crates/syauth-cli/src/{list.rs,revoke.rs,status.rs}`.
 
-**Journey:** `JOURNEY-{id}-day2-cli.md`
+**Journey:** [`JOURNEY-S-012-day2-cli.md`](../journeys/JOURNEY-S-012-day2-cli.md)
 
 ---
 

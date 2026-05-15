@@ -1,0 +1,15 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"install-pam\", \"--help\"])"
+---
+Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snapshot of the original
+
+Usage: syauth install-pam [OPTIONS] --service <SERVICE>
+
+Options:
+      --service <SERVICE>          PAM service to install into (e.g. `sudo`, `login`, `gdm-password`)
+      --pam-dir <PAM_DIR>          PAM service directory to modify. Defaults to `/etc/pam.d`. Tests inject a tempdir [default: /etc/pam.d]
+      --module-args <MODULE_ARGS>  Module arguments appended after the so-name. Defaults to `timeout=1200` [default: timeout=1200]
+      --so-path <SO_PATH>          Shared-object name of the PAM module. Defaults to `pam_syauth.so`. PAM resolves this against its module search path [default: pam_syauth.so]
+      --yes                        Skip the interactive confirmation prompt. Tests always pass this
+  -h, --help                       Print help

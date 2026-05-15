@@ -55,10 +55,16 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+regex = "1"
 tempfile = "3"
 # Full tokio feature set so `#[tokio::test]` and `tokio::time::pause` are
 # available in the pair_flow integration test.
 tokio = { version = "1", features = ["full"] }
+# Snapshot testing for S-012 `--help` / `--version` surface (DoD #5).
+# Each subcommand's help output is committed as a `.snap` file in
+# `tests/snapshots/`; a `clap`-derived regression surfaces as a diff that
+# requires a conscious `cargo insta accept` to land.
+insta = "1"
 
 [lints]
 workspace = true

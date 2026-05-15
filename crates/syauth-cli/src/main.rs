@@ -1,11 +1,13 @@
 //! `syauth` — top-level CLI dispatcher.
 //!
-//! Roadmap items S-011 (`pair`, `list`), S-013 (`install-pam`, `uninstall-pam`).
+//! Roadmap items S-011 (`pair`, `list`), S-012 (`revoke`, `status`),
+//! S-013 (`install-pam`, `uninstall-pam`).
 //! This binary delegates all subcommand logic to `syauth_cli::*` library
 //! modules so tests and future callers can drive them in-process.
 //!
 //! Journeys:
 //! - specs/journeys/JOURNEY-S-011-pairing-desktop.md
+//! - specs/journeys/JOURNEY-S-012-day2-cli.md
 //! - specs/journeys/JOURNEY-S-013-pam-install-helper.md
 
 use std::{
@@ -20,6 +22,8 @@ use syauth_cli::{
     install_pam::{self, InstallOpts, InstallOutcome},
     list::run_list,
     pair::{AdapterInfo, LescOutcome, ListOpts, PairBackend, PairCandidate, PairError, PairOpts, PairingPhase, run_pair},
+    revoke::{RevokeOpts, run_revoke},
+    status::{StatusOpts, run_status},
     uninstall_pam::{self, UninstallOpts, UninstallOutcome},
 };
 
@@ -43,6 +47,13 @@ enum Cmd {
     Pair(PairOpts),
     /// Print the bonds file as TSV: id\tname\tstatus\tcreated_at.
     List(ListOpts),
+    /// Mark a bond as revoked (idempotent). The bond record itself is
+    /// preserved so the audit trail survives; the PAM module refuses
+    /// unlock attempts from revoked peers.
+    Revoke(RevokeOpts),
+    /// Print adapter state, advertising state, bond count, and the most
+    /// recent unlock outcome. Read-only — never writes to the host.
+    Status(StatusOpts),
     /// Wire `pam_syauth.so` into a PAM service file, atomically and with a
     /// `.bak` snapshot of the original.
     InstallPam(InstallOpts),
@@ -80,9 +91,19 @@ async fn dispatch(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Pair(opts) => run_pair_cli(&opts).await,
         Cmd::List(opts) => run_list_cli(&opts),
+        Cmd::Revoke(opts) => run_revoke_cli(&opts),
+        Cmd::Status(opts) => run_status_cli(&opts).await,
         Cmd::InstallPam(opts) => run_install(&opts),
         Cmd::UninstallPam(opts) => run_uninstall(&opts),
     }
+}
+
+fn run_revoke_cli(opts: &RevokeOpts) -> Result<()> {
+    run_revoke(opts).map_err(Into::into)
+}
+
+async fn run_status_cli(opts: &StatusOpts) -> Result<()> {
+    run_status(opts).await.map_err(Into::into)
 }
 
 async fn run_pair_cli(opts: &PairOpts) -> Result<()> {

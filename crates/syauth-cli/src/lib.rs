@@ -7,13 +7,16 @@
 //! binary driven by `assert_cmd` in `tests/install_pam.rs` and the in-process
 //! mock-backend test in `tests/pair_flow.rs`.
 //!
-//! Roadmap: specs/syauth/ROADMAP.md items S-011, S-013.
+//! Roadmap: specs/syauth/ROADMAP.md items S-011, S-012, S-013.
 //! Journeys:
 //! - specs/journeys/JOURNEY-S-011-pairing-desktop.md
+//! - specs/journeys/JOURNEY-S-012-day2-cli.md
 //! - specs/journeys/JOURNEY-S-013-pam-install-helper.md
 
 pub mod install_pam;
 pub mod list;
 pub mod oob;
 pub mod pair;
+pub mod revoke;
+pub mod status;
 pub mod uninstall_pam;
