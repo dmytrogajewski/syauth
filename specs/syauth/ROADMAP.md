@@ -948,17 +948,24 @@ The method is a hidden API since API 1 and remains hidden in API 34. `Reflection
 **DoR:** S-019 complete (because the threat model needs to look at real wire behavior, not just the spec).
 
 **DoD:**
-- [ ] `specs/threat/THREAT-{datetime}.md` exists with all sections per `/threat` Phase 7.
-- [ ] Every one of the ten canonical abuse paths (§4 of `/threat`) is either mitigated or accepted-residual with rationale.
-- [ ] Every open finding maps to either an existing roadmap item (link by ID) or a failing test that lands in this step.
-- [ ] `docs/security.md` written for end-users (what syauth protects vs. doesn't).
+- [x] `specs/threat/THREAT-{datetime}.md` exists with all sections per `/threat` Phase 7.
+- [x] Every one of the ten canonical abuse paths (§4 of `/threat`) is either mitigated or accepted-residual with rationale.
+- [x] Every open finding maps to either an existing roadmap item (link by ID) or a failing test that lands in this step.
+- [x] `docs/security.md` written for end-users (what syauth protects vs. doesn't).
 
 **Tests:**
 - Tests added by this step land alongside the affected code; no new test file is required by the step itself.
 
 **Files likely affected:** `specs/threat/THREAT-{datetime}.md`, `docs/security.md`, plus per-finding fixes.
 
-**Journey:** `JOURNEY-{id}-threat-closeout.md`
+**Journey:** `JOURNEY-S-020-threat-closeout.md`
+
+### Evidence
+
+- **Threat artifact** — [`specs/threat/THREAT-2026-05-15.md`](../threat/THREAT-2026-05-15.md) ships with all seven `/threat` Phase 7 sections in the mandated order: §1 Scope, §2 Assets + Actors, §3 STRIDE matrix, §4 Domain abuse paths (the ten canonical paths, one subsection each), §5 Findings table (T-001..T-010 plus F-001..F-007), §6 Test mapping (every mitigated row cites a passing `cargo test`-runnable test), §7 Accepted residual risks (four named RES rows with rationale paragraphs), plus §8 New-findings narrative and §9 Sign-off block. SPEC §6 T-NNN ids are reused verbatim and the SKILL §4 → SPEC §6 mapping is documented identity (4.x ↔ T-00x) at the top of §4.
+- **Canonical abuse paths resolved** — every path 4.1..4.10 in the threat doc carries a **Status** line that is either `Mitigated` (with file:line and a `cargo test`-runnable test name) or `Accepted residual` (with a rationale paragraph in §7). T-001 mitigates the passive-relay class via mandatory BiometricPrompt-gated Keystore signing (S-017) and accepts coerced-biometric / synthetic-biometric as T-001-RES. T-002 mitigates via `ReplayCache` at `crates/syauth-core/src/replay.rs:78-118` and `crates/syauth-pam/src/auth.rs:432-447`, pinned by `exact_replay_rejected` + `tc04_replay_returns_pam_auth_err`. T-003 mitigates via LESC gate + app-OOB at `crates/syauth-cli/src/pair.rs:444-459` and `:489-511`, pinned by `pair_rejects_when_adapter_lacks_lesc{_even_with_yes}`. T-004 mitigates via operator-initiated `syauth pair` (the only bond-writing path), pinned by `pair_operator_reject_writes_no_bond`. T-005 mitigates via `CONTROL_FLAG = "required"` at `crates/syauth-cli/src/install_pam.rs:38`. T-006 mitigates via Android Keystore `setUserAuthenticationRequired(true)` and BiometricPrompt, accepts the phone-unlocked-at-theft window as T-006-RES. T-007 mitigates non-root reads via 0o600 bond file / 0o700 parent at `crates/syauth-core/src/bond.rs:57-72` and accepts root-on-host as T-007-RES per SPEC §6. T-008 mitigates via the `AuthInfoUnavail` mapping at `crates/syauth-pam/src/auth.rs:312-323` plus the `required` default that preserves `pam_unix` fallback. T-009 mitigates via the rotating session UUID at `crates/syauth-transport/src/bluez.rs:57,62,143`, pinned by `session_uuid_for_is_deterministic_per_minute` + `session_uuid_for_rotates_each_minute`. T-010 mitigates via `subtle::ConstantTimeEq` in `verify_tag` at `crates/syauth-core/src/mac.rs:65-72` and `ed25519_dalek::verify_strict` at `crates/syauth-core/src/sign.rs:82-86`; deeper side channels accepted as T-010-RES.
+- **Findings mapped to artifacts** — every finding in the §5 Findings Table maps to either a passing test (column 6 = `mitigated`, with `cargo test`-runnable name in §6 Test Mapping) or an accepted-residual rationale paragraph in §7. No finding has status `open` and no finding was deferred to a new roadmap item; the §8 "New Findings From This Audit" narrative confirms that walking the four-actor × seven-element STRIDE matrix surfaced seven additional findings (F-001..F-007) — all of which were already mitigated by S-001..S-019 work. `make test` exits 0; every cited test name was verified to exist in the source via grep prior to writing the threat doc.
+- **End-user security doc** — [`docs/security.md`](../../docs/security.md) ships under the 800-word budget (770 words) with the four required sections: "What syauth protects against" (5 items, the SPEC-grounded list: shoulder surfing, password sniffing, ssh-key theft from unencrypted home, opportunistic `sudo` shoulder-surf, in-session replay), "What syauth does NOT protect against" (5 items, the residual list: compromised PAM stack, coerced biometric, side-channel after Keystore extract, nation-state radios, lost phone with PIN), "Operational hygiene" (7-item checklist including update phone, disable USB debugging, prefer StrongBox, audit bond store with `syauth list`, rotate bonds, preserve `pam_unix` fallback, do not pair in a crowd), and "What changes between v0.1 and v0.2" (pointers to the SPEC §3.3 OUT-list / ROADMAP "Out of roadmap (v0.2 candidates)" — UWB/RTT, multi-peer, LAN fallback, iOS). Audience is a security-conscious Linux user, prose only, no emojis, no shock-value framing, no LaTeX. The doc closes with a "Where to look in the source" pointer back to the threat doc and the high-traffic crates.
 
 ---
 
