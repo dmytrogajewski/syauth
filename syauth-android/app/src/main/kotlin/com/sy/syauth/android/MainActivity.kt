@@ -46,6 +46,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import com.sy.syauth.android.ui.theme.SyauthTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -244,7 +245,7 @@ class MainActivity : FragmentActivity() {
             bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
         }
         setContent {
-            MaterialTheme {
+            SyauthTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
@@ -361,7 +362,16 @@ private fun ApproveRoute(
             responseSender = GattResponseSender(peerId = payload.peerId),
         )
     }
-    ApproveScreen(viewModel = viewModel)
+    ApproveScreen(
+        viewModel = viewModel,
+        // After the approve / deny dwell elapses, finish the activity
+        // so Android returns the user to whatever was in the
+        // foreground before the unlock prompt — same pattern as
+        // 1Password / Google Smart Lock. We do not pop back to the
+        // OOB home route because the host service handles the next
+        // challenge end to end without needing the activity alive.
+        onDismiss = { activity.finish() },
+    )
 }
 
 /** Ed25519 seed length, named so we don't sprinkle the literal `32`. */

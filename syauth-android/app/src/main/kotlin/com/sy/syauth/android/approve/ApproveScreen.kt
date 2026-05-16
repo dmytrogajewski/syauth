@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
@@ -73,18 +74,58 @@ private val APP_ICON_SIZE_DP = 56.dp
 private val BUTTON_SPACING_DP = 12.dp
 
 /**
+ * Dwell time on the `Approved` terminal state before the activity
+ * dismisses itself. Long enough that the user sees "Unlock approved"
+ * as confirmation, short enough that it does not feel like a stall.
+ */
+public const val APPROVED_DISMISS_DELAY_MILLIS: Long = 1_500L
+
+/**
+ * Dwell time on the `Denied` terminal state. Longer than the Approved
+ * dwell so the user has time to read the reason ("timed out", "user
+ * denied", etc.) before the activity dismisses.
+ */
+public const val DENIED_DISMISS_DELAY_MILLIS: Long = 2_500L
+
+/**
  * Render the Approve screen for [viewModel]. The composable is a pure
  * function of `viewModel.uiState`; every action flows back through
- * `viewModel.onApproveClicked` / `viewModel.onDenyClicked`.
+ * `viewModel.onApproveClicked` / `viewModel.onDenyClicked`. When the
+ * state reaches a terminal value (Approved / Denied), [onDismiss] is
+ * invoked after a short confirmation dwell so the host activity can
+ * `finish()` itself and return the user to the previous foreground.
  */
 @Composable
-public fun ApproveScreen(viewModel: ApproveViewModel) {
+public fun ApproveScreen(
+    viewModel: ApproveViewModel,
+    onDismiss: () -> Unit = {},
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     // Start the countdown exactly once when the screen enters
     // composition. `LaunchedEffect(Unit)` keys to the screen lifecycle.
     LaunchedEffect(Unit) {
         viewModel.start()
+    }
+
+    // Auto-dismiss on a terminal state. The delay gives the user time
+    // to read the confirmation; once it elapses, [onDismiss] is
+    // called exactly once per terminal transition. Keying on
+    // `state::class` (not the whole instance) means a value change
+    // inside the same terminal variant — none today — would not
+    // restart the timer.
+    LaunchedEffect(state::class) {
+        when (state) {
+            is ApproveUiState.Approved -> {
+                delay(APPROVED_DISMISS_DELAY_MILLIS)
+                onDismiss()
+            }
+            is ApproveUiState.Denied -> {
+                delay(DENIED_DISMISS_DELAY_MILLIS)
+                onDismiss()
+            }
+            else -> Unit
+        }
     }
 
     val safeHostname = sanitizeHostname(viewModel.hostname)
