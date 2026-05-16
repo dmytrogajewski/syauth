@@ -35,7 +35,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use syauth_core::{
@@ -43,7 +43,7 @@ use syauth_core::{
     KeyStore, NONCE_LEN, ReplayCache, SIGNATURE_LEN, SYAUTH_WIRE_VERSION_V1, Signature, TAG_LEN, VerifyError, VerifyingKey, compute_tag,
     verify_frame, verify_tag,
 };
-use syauth_transport::{BtPeer, TransportError};
+use syauth_transport::{BlueZBtPeer, BtPeer, PairingState as TransportPairingState, TransportError};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
@@ -279,7 +279,7 @@ fn authenticate_inner(cfg: &Config, _started: Instant) -> AuthOutcome {
     challenge.tag = compute_tag(&bond_key, &body);
 
     // -- step 5: acquire a BtPeer ---------------------------------------
-    let peer = match acquire_peer(cfg) {
+    let peer = match acquire_peer(cfg, &bond_key, &peer_id) {
         Ok(p) => p,
         Err(reason) => {
             return AuthOutcome::AuthErr {
@@ -549,17 +549,32 @@ fn load_bond_key_from_file(cfg: &Config, peer_id: &str) -> Result<[u8; BOND_KEY_
 
 /// Acquire the `BtPeer` instance for this call.
 ///
-/// In production, this falls back to a stub that always returns
-/// `TransportError::NotPaired`; the real BlueZ peer arrives in S-019. In
-/// tests, the mock peer installed via [`install_mock_peer`] is returned
-/// when `cfg.mock_peer_enabled` is true.
-fn acquire_peer(cfg: &Config) -> Result<Arc<dyn BtPeer>, &'static str> {
+/// Resolution order:
+///
+/// 1. Tests with `cfg.mock_peer_enabled = true` and a mock installed
+///    via [`install_mock_peer`] receive the mock. Preserves the
+///    integration-test surface unchanged.
+/// 2. Production constructs a real
+///    [`syauth_transport::BlueZBtPeer`] bound to the configured
+///    adapter, the loaded `bond_key`, and a [`TransportPairingState::Bonded`]
+///    carrying `peer_id`. The adapter is opened lazily by the
+///    `BlueZBtPeer::connect` call inside the per-call tokio runtime —
+///    the sync constructor [`BlueZBtPeer::new_sync`] skips the eager
+///    adapter probe because there is no tokio handle in scope here.
+fn acquire_peer(cfg: &Config, bond_key: &[u8; BOND_KEY_LEN], peer_id: &str) -> Result<Arc<dyn BtPeer>, &'static str> {
     if cfg.mock_peer_enabled
         && let Some(mock) = MOCK_PEER.get()
     {
         return Ok(Arc::clone(mock));
     }
-    Ok(Arc::new(NotPairedPeer))
+    let peer = BlueZBtPeer::new_sync(
+        &cfg.adapter_id,
+        bond_key,
+        TransportPairingState::Bonded {
+            peer_id: peer_id.to_owned(),
+        },
+    );
+    Ok(Arc::new(peer))
 }
 
 /// Read-only handle to a per-test [`InMemoryKeyStore`]. Tests install one
@@ -663,18 +678,9 @@ impl ReplaySeed {
 // NotPairedPeer — production fallback when no real radio is wired yet.
 // -----------------------------------------------------------------------------
 
-/// Placeholder `BtPeer` that always returns `TransportError::NotPaired`.
-///
-/// This is what production builds receive in S-009; S-019 will swap in
-/// `syauth_transport::BlueZBtPeer`.
-struct NotPairedPeer;
-
-#[async_trait::async_trait]
-impl BtPeer for NotPairedPeer {
-    async fn connect(&self, _timeout: Duration) -> Result<Box<dyn syauth_transport::Session>, TransportError> {
-        Err(TransportError::NotPaired)
-    }
-}
+// The S-009-era `NotPairedPeer` placeholder was removed in the
+// acquire_peer rewrite — production now constructs a real
+// `syauth_transport::BlueZBtPeer` via `BlueZBtPeer::new_sync`.
 
 // -----------------------------------------------------------------------------
 // Tests — pure-unit coverage. The nine SPEC §4.3 scenarios live in
@@ -683,6 +689,8 @@ impl BtPeer for NotPairedPeer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use syauth_core::{PEER_ID_BLAKE3_BYTES, peer_id_from_pubkey};
 
     use super::*;

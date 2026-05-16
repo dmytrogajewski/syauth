@@ -61,6 +61,17 @@ pub const TEST_MOCK_ENV_VAR: &str = "SYAUTH_TEST_MOCK";
 /// `"yes"`, `""`, unset) is treated as off.
 pub const TEST_MOCK_ENV_ENABLED_VALUE: &str = "1";
 
+/// Default BlueZ adapter id used by the production [`crate::auth::acquire_peer`]
+/// path to construct a [`syauth_transport::BlueZBtPeer`]. Matches the
+/// transport crate's `DEFAULT_ADAPTER_NAME`. Operators with a non-default
+/// adapter override via the `SYAUTH_ADAPTER` env var.
+pub const DEFAULT_ADAPTER_NAME: &str = "hci0";
+
+/// Env var honored by [`Config::from_env`] that overrides
+/// [`DEFAULT_ADAPTER_NAME`]. Useful on machines with multiple BT
+/// adapters or when running tests against a virtual adapter.
+pub const ADAPTER_ENV_VAR: &str = "SYAUTH_ADAPTER";
+
 /// Runtime configuration consumed by [`crate::auth::authenticate`].
 ///
 /// Construct via [`Config::from_env`] in production code, [`Config::for_tests`]
@@ -74,6 +85,11 @@ pub struct Config {
     /// Whether the mock-peer injection slot is honored. Computed from the
     /// env var AND the compile-time flags by [`Config::from_env`].
     pub mock_peer_enabled: bool,
+    /// BlueZ adapter id (e.g. "hci0") passed to
+    /// [`syauth_transport::BlueZBtPeer::new`]. Defaults to
+    /// [`DEFAULT_ADAPTER_NAME`]; overridden via [`ADAPTER_ENV_VAR`] in
+    /// [`Config::from_env`].
+    pub adapter_id: String,
 }
 
 impl Default for Config {
@@ -82,6 +98,7 @@ impl Default for Config {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
             mock_peer_enabled: false,
+            adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
     }
 }
@@ -108,10 +125,12 @@ impl Config {
             .map(|v| v == TEST_MOCK_ENV_ENABLED_VALUE)
             .unwrap_or(false);
         let allowed_by_build = under_cargo_test || test_mock_feature;
+        let adapter_id = std::env::var(ADAPTER_ENV_VAR).unwrap_or_else(|_| DEFAULT_ADAPTER_NAME.to_owned());
         Self {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
             mock_peer_enabled: env_says_on && allowed_by_build,
+            adapter_id,
         }
     }
 
@@ -126,6 +145,7 @@ impl Config {
             bond_dir: bond_dir.to_path_buf(),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
             mock_peer_enabled: true,
+            adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
     }
 

@@ -333,6 +333,25 @@ impl BlueZBtPeer {
         Ok(())
     }
 
+    /// Synchronous constructor that skips the eager adapter probe.
+    ///
+    /// Used by the PAM module's `acquire_peer` (which has no tokio
+    /// runtime in scope at construction time). The adapter is opened
+    /// lazily inside [`BtPeer::connect`] anyway, so the only loss
+    /// versus [`Self::new`] is the up-front "missing adapter" check —
+    /// the same error surfaces on the first unlock attempt instead.
+    /// Acceptable trade-off given that the PAM path always wants to
+    /// fail closed on the connect call, not on construction.
+    #[must_use]
+    pub fn new_sync(adapter_id: &str, bond_key: &[u8; BOND_KEY_BYTES], pairing_state: PairingState) -> Self {
+        Self {
+            adapter_id: adapter_id.to_owned(),
+            bond_key: *bond_key,
+            pairing_state,
+            restart_count: AtomicU64::new(0),
+        }
+    }
+
     /// Compute the rotating session UUID for the given wall-clock minute.
     ///
     /// Public so callers (CLI, tests) can drive it deterministically without
