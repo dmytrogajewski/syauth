@@ -38,6 +38,16 @@ thiserror = "2"
 # `#[tokio::test]` attribute compiles inside the mock's test module.
 tokio = { version = "1", features = ["sync", "macros", "time", "rt", "rt-multi-thread"] }
 
+# `BlueZBtPeer::connect` consumes async streams from bluer (Adapter
+# discovery, Characteristic notifications). `futures` provides the
+# `StreamExt::next` adapter we need to await one event with timeout.
+futures = "0.3"
+
+# `Uuid::from_u128` so the syauth GATT UUIDs can be defined as
+# compile-time constants matching the Kotlin
+# `UUID.fromString(...)` constants on the phone side.
+uuid = "1"
+
 # Official BlueZ Rust binding (S-010). `bluetoothd` is the feature that enables
 # the high-level DBus surface — adapter / device / GATT — which is exactly the
 # surface `BlueZBtPeer` consumes. Pinned to the `0.17` major; minor revs flow

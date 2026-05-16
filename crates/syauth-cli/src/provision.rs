@@ -54,8 +54,7 @@ use std::{
 use clap::Parser;
 use rand::{RngCore, rngs::OsRng};
 use serde::Serialize;
-use syauth_core::bond::PUBKEY_LEN;
-use syauth_core::{Bond, BondStatus, BondStore, BOND_KEY_BYTES, SigningKey, peer_id_from_pubkey};
+use syauth_core::{BOND_KEY_BYTES, Bond, BondStatus, BondStore, SigningKey, bond::PUBKEY_LEN, peer_id_from_pubkey};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -239,7 +238,7 @@ pub fn run_provision_test(opts: &ProvisionOpts) -> Result<ProvisionOutcome, Prov
 
 fn validate_name(name: &str) -> Result<(), ProvisionError> {
     let n = name.len();
-    if n < HOST_NAME_MIN_LEN || n > HOST_NAME_MAX_LEN {
+    if !(HOST_NAME_MIN_LEN..=HOST_NAME_MAX_LEN).contains(&n) {
         return Err(ProvisionError::InvalidName { got: n });
     }
     Ok(())
@@ -299,8 +298,9 @@ fn write_provision_file(path: &Path, body: &str) -> Result<(), ProvisionError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn opts(td: &TempDir, name: &str) -> ProvisionOpts {
         ProvisionOpts {
@@ -371,7 +371,11 @@ mod tests {
         for key in ["bond_key_hex", "phone_signing_key_hex", "phone_pubkey_hex"] {
             let v = tbl.get(key).and_then(|v| v.as_str()).unwrap();
             assert_eq!(v.len(), 64, "field {key} should be 32 bytes hex-encoded");
-            assert!(v.chars().all(|c| c.is_ascii_hexdigit() && (!c.is_ascii_alphabetic() || c.is_lowercase())), "{key} must be lowercase hex");
+            assert!(
+                v.chars()
+                    .all(|c| c.is_ascii_hexdigit() && (!c.is_ascii_alphabetic() || c.is_lowercase())),
+                "{key} must be lowercase hex"
+            );
         }
     }
 }

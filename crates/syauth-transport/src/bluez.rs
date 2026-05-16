@@ -36,9 +36,16 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bluer::{AdapterEvent, gatt::remote::Characteristic};
+use futures::{StreamExt, stream::BoxStream};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use tokio::sync::mpsc;
+use syauth_core::Frame;
+use tokio::{
+    sync::{Mutex, mpsc},
+    time::timeout as tokio_timeout,
+};
+use uuid::Uuid;
 
 use crate::{BtPeer, Session, error::TransportError};
 
@@ -89,6 +96,30 @@ pub const FRAGMENT_PAYLOAD_MAX: usize = MAX_BLE_MTU - FRAGMENT_HEADER_LEN;
 /// Number of seconds in one wall-clock minute. Named so the "minute floor"
 /// formula at the call site reads as a domain concept, not a magic divisor.
 pub const SECONDS_PER_MINUTE: i64 = 60;
+
+/// Fixed 128-bit UUID of the syauth GATT service. Mirrors the Kotlin
+/// constant `SYAUTH_GATT_SERVICE_UUID` in
+/// `syauth-android/app/src/main/kotlin/com/sy/syauth/android/bg/GattServer.kt`.
+/// Phone advertises this UUID; the desktop scans by it.
+pub const SYAUTH_GATT_SERVICE_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0001);
+
+/// Characteristic the desktop WRITES challenge frames to.
+pub const SYAUTH_CHALLENGE_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0002);
+
+/// Characteristic the phone NOTIFIES the desktop on when a response is
+/// ready. Desktop subscribes and awaits the next emission per call.
+pub const SYAUTH_RESPONSE_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0003);
+
+/// How long [`BlueZBtPeer::connect`] spends scanning for a peer
+/// advertising [`SYAUTH_GATT_SERVICE_UUID`] before giving up with
+/// [`TransportError::Unreachable`]. Picked as half the caller-supplied
+/// timeout when possible; this is the upper cap when the caller passes
+/// a very large timeout.
+pub const DEFAULT_SCAN_WINDOW: Duration = Duration::from_secs(8);
+
+/// Minimum cap for the scan window. Adapters typically need >= 1 second
+/// to flush the kernel scan results into the dbus stream we read from.
+pub const MIN_SCAN_WINDOW: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // PairingState — the `/bt` Phase 2 non-negotiable made executable.
@@ -374,7 +405,7 @@ impl BlueZBtPeer {
 
 #[async_trait]
 impl BtPeer for BlueZBtPeer {
-    async fn connect(&self, _timeout: Duration) -> Result<Box<dyn Session>, TransportError> {
+    async fn connect(&self, peer_timeout: Duration) -> Result<Box<dyn Session>, TransportError> {
         // /bt Phase 2 non-negotiable: the unlock-path NEVER reads from a
         // non-Bonded peer. This is the literal first statement of `connect`
         // and there is no code path that bypasses it.
@@ -382,15 +413,193 @@ impl BtPeer for BlueZBtPeer {
             PairingState::NotPaired => return Err(TransportError::NotPaired),
             PairingState::Bonded { .. } => (),
         }
-        // S-010 ships the trait, the UUID rotation, the reassembly primitive,
-        // the suspend/resume hook, and the error mapping. The actual
-        // challenge/response over a real radio is wired in S-019
-        // ("Full e2e on real radios"). Surfacing this as a typed `Backend`
-        // error keeps the trait honest and lets callers distinguish "module
-        // intentionally incomplete" from "transient backend failure".
-        Err(TransportError::Backend {
-            reason: "BlueZBtPeer::connect real-radio path lands in S-019".to_owned(),
-        })
+        self.connect_inner(peer_timeout).await
+    }
+}
+
+impl BlueZBtPeer {
+    /// Real GATT-client connect path. Opens the configured adapter, scans
+    /// briefly for a peer advertising [`SYAUTH_GATT_SERVICE_UUID`],
+    /// connects, discovers the syauth service + challenge/response
+    /// characteristics, subscribes to response notifications, and wraps
+    /// the result in a [`BlueZSession`].
+    ///
+    /// `peer_timeout` is the caller's total budget for the connect step;
+    /// we split it into a scan window (capped by [`DEFAULT_SCAN_WINDOW`])
+    /// and a remainder spent on the bluer `Device::connect` /
+    /// `services()` / `characteristics()` discovery. Any failure maps to
+    /// a typed [`TransportError`] so the PAM module picks the right
+    /// return code without string-matching.
+    async fn connect_inner(&self, peer_timeout: Duration) -> Result<Box<dyn Session>, TransportError> {
+        let scan_window = scan_window_for(peer_timeout);
+
+        let session = bluer::Session::new()
+            .await
+            .map_err(|err| map_adapter_open_error(&self.adapter_id, err))?;
+        let adapter = session
+            .adapter(&self.adapter_id)
+            .map_err(|err| map_adapter_open_error(&self.adapter_id, err))?;
+        adapter.set_powered(true).await.map_err(|err| TransportError::Backend {
+            reason: format!("adapter set_powered: {err}"),
+        })?;
+
+        let mut filter = adapter.discovery_filter().await;
+        filter.uuids = [SYAUTH_GATT_SERVICE_UUID].into_iter().collect();
+        adapter.set_discovery_filter(filter).await.map_err(|err| TransportError::Backend {
+            reason: format!("set_discovery_filter: {err}"),
+        })?;
+
+        let mut events = adapter.discover_devices().await.map_err(|err| TransportError::Backend {
+            reason: format!("discover_devices: {err}"),
+        })?;
+
+        let device = match tokio_timeout(scan_window, find_syauth_device(&adapter, &mut events)).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(TransportError::Unreachable),
+        };
+
+        // Connect + discover. bluer's `connect()` is idempotent: a
+        // previously-bonded device returns Ok(()) immediately.
+        device.connect().await.map_err(|err| TransportError::Backend {
+            reason: format!("device.connect: {err}"),
+        })?;
+
+        let services = device.services().await.map_err(|err| TransportError::Backend {
+            reason: format!("device.services: {err}"),
+        })?;
+
+        let mut challenge_char: Option<Characteristic> = None;
+        let mut response_char: Option<Characteristic> = None;
+        for svc in services {
+            let uuid = svc.uuid().await.map_err(|err| TransportError::Backend {
+                reason: format!("service.uuid: {err}"),
+            })?;
+            if uuid != SYAUTH_GATT_SERVICE_UUID {
+                continue;
+            }
+            let chars = svc.characteristics().await.map_err(|err| TransportError::Backend {
+                reason: format!("service.characteristics: {err}"),
+            })?;
+            for ch in chars {
+                let cu = ch.uuid().await.map_err(|err| TransportError::Backend {
+                    reason: format!("characteristic.uuid: {err}"),
+                })?;
+                if cu == SYAUTH_CHALLENGE_CHAR_UUID {
+                    challenge_char = Some(ch);
+                } else if cu == SYAUTH_RESPONSE_CHAR_UUID {
+                    response_char = Some(ch);
+                }
+            }
+            break;
+        }
+        let challenge_char = challenge_char.ok_or_else(|| TransportError::Backend {
+            reason: "syauth challenge characteristic not exposed by peer".to_owned(),
+        })?;
+        let response_char = response_char.ok_or_else(|| TransportError::Backend {
+            reason: "syauth response characteristic not exposed by peer".to_owned(),
+        })?;
+
+        let notify_stream = response_char.notify().await.map_err(|err| TransportError::Backend {
+            reason: format!("response.notify subscribe: {err}"),
+        })?;
+
+        Ok(Box::new(BlueZSession {
+            challenge_char,
+            // We're forced to box the stream because its concrete type is
+            // not nameable across bluer minor versions.
+            notify: Mutex::new(notify_stream.boxed()),
+        }))
+    }
+}
+
+/// Wait on the discovery stream for a `DeviceAdded` whose advertised
+/// service UUIDs include [`SYAUTH_GATT_SERVICE_UUID`]. Returns the first
+/// match. The caller wraps the future in a `tokio::time::timeout` so a
+/// hung adapter falls through cleanly.
+async fn find_syauth_device(
+    adapter: &bluer::Adapter,
+    events: &mut (impl futures::Stream<Item = AdapterEvent> + Unpin),
+) -> Result<bluer::Device, TransportError> {
+    // First sweep the devices already known to BlueZ from a prior scan;
+    // the discovery filter we just installed will replay them as
+    // DeviceAdded events but only after a property change. Walking the
+    // current set up front cuts the time-to-first-frame from ~5s to a few
+    // hundred ms on a warm cache.
+    let known = adapter.device_addresses().await.map_err(|err| TransportError::Backend {
+        reason: format!("device_addresses: {err}"),
+    })?;
+    for addr in known {
+        if let Ok(d) = adapter.device(addr)
+            && device_advertises_syauth(&d).await
+        {
+            return Ok(d);
+        }
+    }
+    while let Some(ev) = events.next().await {
+        if let AdapterEvent::DeviceAdded(addr) = ev
+            && let Ok(d) = adapter.device(addr)
+            && device_advertises_syauth(&d).await
+        {
+            return Ok(d);
+        }
+    }
+    Err(TransportError::Unreachable)
+}
+
+/// True iff `device` advertises [`SYAUTH_GATT_SERVICE_UUID`] in its
+/// service-UUID set as reported by bluer. A `false` from this function
+/// is not an error — it's the steady-state "this is just some other BLE
+/// device the adapter saw" path.
+async fn device_advertises_syauth(device: &bluer::Device) -> bool {
+    match device.uuids().await {
+        Ok(Some(uuids)) => uuids.contains(&SYAUTH_GATT_SERVICE_UUID),
+        _ => false,
+    }
+}
+
+/// Compute the scan window from the caller-supplied total connect
+/// timeout. Capped at [`DEFAULT_SCAN_WINDOW`] (so a 5-minute caller
+/// budget doesn't burn 2.5 min on scanning) and floored at
+/// [`MIN_SCAN_WINDOW`] (so a sub-second caller budget still gives the
+/// adapter time to drain its kernel scan results).
+fn scan_window_for(total: Duration) -> Duration {
+    let half = total / 2;
+    half.clamp(MIN_SCAN_WINDOW, DEFAULT_SCAN_WINDOW)
+}
+
+/// GATT-client wrapper around the two syauth characteristics. One
+/// session corresponds to one PAM `authenticate` call. The notify
+/// stream lives behind a `Mutex` so the `Send + Sync` bound on the
+/// `Session` trait holds.
+struct BlueZSession {
+    challenge_char: Characteristic,
+    notify: Mutex<BoxStream<'static, Vec<u8>>>,
+}
+
+#[async_trait]
+impl Session for BlueZSession {
+    async fn send_frame(&mut self, frame: &Frame) -> Result<(), TransportError> {
+        let mut bytes = Vec::with_capacity(syauth_core::MAX_FRAME_LEN);
+        frame.encode(&mut bytes).map_err(TransportError::BadFrame)?;
+        // For v0.1 demo we rely on negotiated MTU >= frame.len(). Phones
+        // running Android 5+ negotiate up to 517 bytes, well above the
+        // ~57-byte challenge frame; if a future change pushes a larger
+        // frame, switch to the existing fragment/reassemble pair.
+        self.challenge_char.write(&bytes).await.map_err(|err| TransportError::Backend {
+            reason: format!("challenge.write: {err}"),
+        })?;
+        Ok(())
+    }
+
+    async fn recv_frame(&mut self, deadline: Duration) -> Result<Frame, TransportError> {
+        let mut guard = self.notify.lock().await;
+        let bytes = match tokio_timeout(deadline, guard.next()).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return Err(TransportError::Closed),
+            Err(_) => return Err(TransportError::Timeout),
+        };
+        Frame::decode(&bytes).map_err(TransportError::BadFrame)
     }
 }
 
