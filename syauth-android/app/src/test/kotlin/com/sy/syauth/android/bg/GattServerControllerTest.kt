@@ -41,11 +41,25 @@ private class FakeGattServerHandle : GattServerHandle {
     var lastAddedService: BluetoothGattService? = null
         private set
     var addServiceReturn: Boolean = true
+    var lastWriteHandler: ((String, ByteArray) -> Unit)? = null
+        private set
+    var notifiedFrames: MutableList<ByteArray> = mutableListOf()
+        private set
+    var notifyReturn: Boolean = true
 
     override fun addService(service: BluetoothGattService): Boolean {
         addServiceCount += 1
         lastAddedService = service
         return addServiceReturn
+    }
+
+    override fun setWriteHandler(handler: ((String, ByteArray) -> Unit)?) {
+        lastWriteHandler = handler
+    }
+
+    override fun notifyResponse(bytes: ByteArray): Boolean {
+        notifiedFrames.add(bytes)
+        return notifyReturn
     }
 
     override fun close() {
@@ -60,7 +74,7 @@ class GattServerControllerTest {
     @Test
     fun start_registers_service_with_pinned_uuid_and_two_chars() {
         val handle = FakeGattServerHandle()
-        val controller = BluerlessGattServerController { handle }
+        val controller = BluerlessGattServerController(handleFactory = { handle })
 
         controller.start(association = null) { _, _ -> }
 
@@ -82,7 +96,7 @@ class GattServerControllerTest {
     @Test
     fun start_is_idempotent_does_not_register_twice() {
         val handle = FakeGattServerHandle()
-        val controller = BluerlessGattServerController { handle }
+        val controller = BluerlessGattServerController(handleFactory = { handle })
 
         controller.start(association = null) { _, _ -> }
         controller.start(association = null) { _, _ -> }
@@ -93,7 +107,7 @@ class GattServerControllerTest {
     @Test
     fun stop_closes_handle_and_clears_callback() {
         val handle = FakeGattServerHandle()
-        val controller = BluerlessGattServerController { handle }
+        val controller = BluerlessGattServerController(handleFactory = { handle })
 
         controller.start(association = null) { _, _ -> }
         assertNotNull(controller.pendingChallengeCallback)
@@ -106,7 +120,7 @@ class GattServerControllerTest {
     @Test
     fun stop_on_idle_is_a_noop() {
         val handle = FakeGattServerHandle()
-        val controller = BluerlessGattServerController { handle }
+        val controller = BluerlessGattServerController(handleFactory = { handle })
 
         controller.stop()
 
@@ -116,10 +130,12 @@ class GattServerControllerTest {
     @Test
     fun restart_after_stop_acquires_fresh_handle() {
         var built = 0
-        val controller = BluerlessGattServerController {
-            built += 1
-            FakeGattServerHandle()
-        }
+        val controller = BluerlessGattServerController(
+            handleFactory = {
+                built += 1
+                FakeGattServerHandle()
+            },
+        )
 
         controller.start(association = null) { _, _ -> }
         controller.stop()
@@ -131,7 +147,7 @@ class GattServerControllerTest {
     @Test
     fun callback_is_retained_until_stop() {
         val handle = FakeGattServerHandle()
-        val controller = BluerlessGattServerController { handle }
+        val controller = BluerlessGattServerController(handleFactory = { handle })
         val cb: (String, ByteArray) -> Unit = { _, _ -> }
 
         controller.start(association = null, onChallenge = cb)

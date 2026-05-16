@@ -194,6 +194,36 @@ lifecycle; we own only the GATT setup/teardown within the binding's
 lifetime. The result: zero radio usage when the bonded peer is out of
 range, and zero process-keepalive battery cost.
 
+## Provision-file bootstrap (v0.1 demo)
+
+For v0.1 the LESC pair flow is stubbed on both ends: the desktop's
+phone-side BLE backend and the phone's `StubPairBackend` both return
+"real-radio path lands in a future roadmap item". To still deliver a
+working end-to-end unlock, the desktop's `syauth provision-test`
+subcommand generates all shared material out of band and emits a
+single TOML package (`syauth-provision.toml`) carrying the 32-byte
+`bond_key`, the phone's Ed25519 signing-key seed, and the bond
+metadata. The operator transports this file to the phone over a USB
+cable (`adb push syauth-provision.toml /sdcard/Download/`). On first
+launch the phone reads it, persists the bond to app-private storage,
+and deletes the source file from `Downloads/` so the plaintext key
+does not linger in shared storage. Subsequent launches read the
+persisted record directly; the provision file is consumed exactly
+once per install.
+
+The Ed25519 seed is stored in plaintext under `context.filesDir`
+(specifically `syauth-bond.toml` — the same shape as the provision
+file). This is acceptable for v0.1 because the directory is sandboxed
+to the app's UID and the device threat model assumes an unrooted
+device, but it is **not** the long-term design. The canonical v0.2
+path will wrap the seed in an Android-Keystore-backed AES cipher and
+require a fresh BiometricPrompt gesture to decrypt; the
+`SigningKeyProvider` seam in `approve/SigningKeyProvider.kt` exists
+precisely so this swap is local. The provision package itself
+contains a private key and must NEVER be transported over a network
+or shared storage — only over a trusted USB cable under the
+operator's physical control.
+
 ## Future setup steps
 
 The following will be appended as future roadmap items land:

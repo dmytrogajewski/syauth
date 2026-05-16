@@ -22,7 +22,7 @@ use syauth_cli::{
     install_pam::{self, InstallOpts, InstallOutcome},
     list::run_list,
     pair::{AdapterInfo, LescOutcome, ListOpts, PairBackend, PairCandidate, PairError, PairOpts, PairingPhase, run_pair},
-    provision::{ProvisionOpts, PROVISION_SUCCESS_BANNER, run_provision_test},
+    provision::{PROVISION_SUCCESS_BANNER, ProvisionOpts, run_provision_test},
     revoke::{RevokeOpts, run_revoke},
     status::{StatusOpts, run_status},
     uninstall_pam::{self, UninstallOpts, UninstallOutcome},

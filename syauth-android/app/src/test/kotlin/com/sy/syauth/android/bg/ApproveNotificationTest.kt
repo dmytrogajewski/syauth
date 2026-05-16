@@ -24,8 +24,8 @@ import org.robolectric.annotation.Config
 
 private const val TEST_PEER_ID: String = "AA:BB:CC:DD:EE:FF"
 private const val TEST_HOSTNAME: String = "alex-desktop"
-private val TEST_CHALLENGE: ByteArray = ByteArray(CHALLENGE_LEN) { it.toByte() }
 private const val CHALLENGE_LEN: Int = 64
+private val TEST_CHALLENGE: ByteArray = ByteArray(CHALLENGE_LEN) { it.toByte() }
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])

@@ -39,10 +39,16 @@
                            required when a foreground service exists
                            because of a bonded device (S-018).
 
+  v0.1 demo addition: the phone advertises the syauth service UUID so
+  the desktop's `bluer` scan can discover the phone without operator
+  pre-configuration of the MAC. The presence-tracking defense the
+  original SPEC §3.2 D8 line called out lands in v0.2 once the LESC
+  pair flow ships (the desktop will then re-advertise rotating UUIDs;
+  the phone's advertise will be gated behind an "advertise during
+  pair window" toggle).
+
   Explicitly NOT declared (still owned by future roadmap items):
     - INTERNET             — never (BLE-only protocol per SPEC §3.4).
-    - BLUETOOTH_ADVERTISE  — never (desktop advertises; phone scans —
-                              SPEC §3.2 D8, presence-tracking defense).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -56,6 +62,14 @@
     <!-- BLE connect + LESC bond: S-016 Phase 3. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:targetApi="31" />
+
+    <!-- BLE advertise: v0.1 demo. The phone advertises
+         SYAUTH_GATT_SERVICE_UUID so the desktop's `bluer` scanner
+         can find the phone without manual MAC entry. See the
+         "v0.1 demo addition" block in the file header. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
         tools:targetApi="31" />
 
     <!-- Legacy: BLE scans on API 26-30 require ACCESS_FINE_LOCATION. -->
@@ -127,5 +141,18 @@
                 <action android:name="android.companion.CompanionDeviceService" />
             </intent-filter>
         </service>
+
+        <!--
+          v0.1 demo: always-on GATT host service. Started from
+          MainActivity.onCreate after the bond bootstrap returns a
+          non-null record. Independent of CDM so the desktop can
+          challenge → unlock flow works without a phone-initiated
+          LESC pairing (which is still stubbed).
+        -->
+        <service
+            android:name=".bg.SyauthGattHostService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice"
+            tools:targetApi="34" />
     </application>
 </manifest>

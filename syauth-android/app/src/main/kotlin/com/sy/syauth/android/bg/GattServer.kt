@@ -26,10 +26,20 @@
 package com.sy.syauth.android.bg
 
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
 import android.companion.AssociationInfo
+import android.os.ParcelUuid
+import android.util.Log
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+
+/** Logcat tag for the GATT server controller. */
+internal const val GATT_SERVER_LOG_TAG: String = "syauth.gatt"
 
 /**
  * Service UUID our GATT server publishes. Mirrors the desktop's
@@ -140,8 +150,47 @@ public interface GattServerHandle {
     /** Register a GATT service. */
     public fun addService(service: BluetoothGattService): Boolean
 
+    /**
+     * Install the callback invoked when the desktop writes a frame to
+     * the challenge characteristic. Production wires this to the real
+     * `BluetoothGattServerCallback.onCharacteristicWriteRequest`; tests
+     * call the handler synthetically. Pass `null` to clear.
+     */
+    public fun setWriteHandler(handler: ((deviceAddress: String, value: ByteArray) -> Unit)?)
+
+    /**
+     * Notify the connected desktop with [bytes] on the response
+     * characteristic. Returns `true` when the notify call was queued by
+     * the platform; `false` when no peer is connected or the notify
+     * failed at the radio. The desktop's `bluer` notify stream picks
+     * the bytes up on success.
+     */
+    public fun notifyResponse(bytes: ByteArray): Boolean
+
     /** Close the underlying server. */
     public fun close()
+}
+
+/**
+ * Thin abstraction over `BluetoothLeAdvertiser`. Allows the always-on
+ * GATT host service to advertise the syauth service UUID so the
+ * desktop's `bluer` scanner can discover the phone without operator
+ * pre-configuration of the MAC.
+ *
+ * Production wraps `BluetoothLeAdvertiser.startAdvertising` /
+ * `stopAdvertising`; tests inject a fake to observe the AdvertiseData
+ * the controller built.
+ */
+public interface BleAdvertiserHandle {
+    /** Begin advertising with the supplied data + settings. */
+    public fun startAdvertising(
+        settings: AdvertiseSettings,
+        data: AdvertiseData,
+        callback: AdvertiseCallback,
+    )
+
+    /** Stop a previously started advertisement. */
+    public fun stopAdvertising(callback: AdvertiseCallback)
 }
 
 /**
@@ -163,9 +212,17 @@ public interface GattServerHandle {
  */
 public class BluerlessGattServerController(
     private val handleFactory: () -> GattServerHandle,
+    private val advertiserFactory: () -> BleAdvertiserHandle? = { null },
 ) : GattServerController {
 
     private val current: AtomicReference<GattServerHandle?> = AtomicReference(null)
+    private val advertiser: AtomicReference<BleAdvertiserHandle?> = AtomicReference(null)
+    private val advertising: AtomicBoolean = AtomicBoolean(false)
+    private val advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {
+        override fun onStartFailure(errorCode: Int) {
+            Log.w(GATT_SERVER_LOG_TAG, "BLE advertise failed errorCode=$errorCode")
+        }
+    }
 
     override fun start(
         association: AssociationInfo?,
@@ -188,21 +245,76 @@ public class BluerlessGattServerController(
                 "BluetoothGattServer.addService rejected SYAUTH_GATT_SERVICE_UUID",
             )
         }
-        // The `onChallenge` callback is wired through the production
-        // adapter's `BluetoothGattServerCallback.onCharacteristicWriteRequest`
-        // path; for tests the fake handle drives the callback
-        // directly via its own surface. We retain a reference to
-        // the callback by stashing it under
-        // [pendingChallengeCallback] so the production adapter can
-        // call it.
+        // Install the bridge from `BluetoothGattServerCallback`'s
+        // write-request path (production) or the test fake's synthetic
+        // driver (tests) into the controller's `pendingChallengeCallback`
+        // closure. The handle holds the function reference; the
+        // controller does not need to drive writes itself.
         pendingChallengeCallback = onChallenge
+        handle.setWriteHandler { deviceAddress, value -> onChallenge(deviceAddress, value) }
+        startAdvertisingIfPossible()
     }
 
     override fun stop() {
         val handle = current.getAndSet(null) ?: return
         pendingChallengeCallback = null
+        handle.setWriteHandler(null)
+        stopAdvertisingIfActive()
         handle.close()
     }
+
+    /**
+     * Push [bytes] to the connected desktop on the response
+     * characteristic. Returns `false` when the server is not started
+     * or no peer is currently connected.
+     */
+    public fun notifyResponse(bytes: ByteArray): Boolean {
+        val handle = current.get() ?: return false
+        return handle.notifyResponse(bytes)
+    }
+
+    private fun startAdvertisingIfPossible() {
+        if (!advertising.compareAndSet(false, true)) {
+            return
+        }
+        val handle = runCatching { advertiserFactory() }
+            .onFailure { Log.w(GATT_SERVER_LOG_TAG, "advertiser factory threw: ${it.message}") }
+            .getOrNull()
+        if (handle == null) {
+            advertising.set(false)
+            Log.w(GATT_SERVER_LOG_TAG, "advertiser unsupported on this adapter; GATT still up")
+            return
+        }
+        advertiser.set(handle)
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+            .setConnectable(true)
+            .build()
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .addServiceUuid(ParcelUuid(SYAUTH_GATT_SERVICE_UUID))
+            .build()
+        runCatching { handle.startAdvertising(settings, data, advertiseCallback) }
+            .onFailure {
+                Log.w(GATT_SERVER_LOG_TAG, "startAdvertising threw: ${it.message}")
+                advertising.set(false)
+                advertiser.set(null)
+            }
+    }
+
+    private fun stopAdvertisingIfActive() {
+        if (!advertising.compareAndSet(true, false)) {
+            return
+        }
+        val handle = advertiser.getAndSet(null) ?: return
+        runCatching { handle.stopAdvertising(advertiseCallback) }
+            .onFailure { Log.w(GATT_SERVER_LOG_TAG, "stopAdvertising threw: ${it.message}") }
+    }
+
+    /** True iff a BLE advertisement is currently active. Exposed for tests. */
+    internal val isAdvertising: Boolean
+        get() = advertising.get()
 
     /**
      * Stashed reference so the production adapter (and the test
@@ -230,8 +342,32 @@ public class BluerlessGattServerController(
             GattProperties.RESPONSE,
             GattPermissions.READ_ENCRYPTED,
         )
+        // CCCD descriptor (0x2902) so the desktop's bluer client can
+        // subscribe to NOTIFY on the response characteristic. Without
+        // this descriptor, `Characteristic::notify()` on the desktop
+        // errors at CCCD-write time and the entire response path stays
+        // dead. The descriptor is writable so subscribe-writes land;
+        // we accept any value and rely on the characteristic's NOTIFY
+        // property to drive the actual stream.
+        val cccd = BluetoothGattDescriptor(
+            CCCD_DESCRIPTOR_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or
+                BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED,
+        )
+        response.addDescriptor(cccd)
         service.addCharacteristic(challenge)
         service.addCharacteristic(response)
         return service
     }
 }
+
+/**
+ * Client Characteristic Configuration Descriptor UUID per the Bluetooth
+ * core spec. Required on every NOTIFY-bearing characteristic so a
+ * client (the desktop in our case) can subscribe by writing the
+ * subscribe bitfield. Hard-coded here rather than pulled from
+ * `android.bluetooth.BluetoothGattDescriptor` because Android does not
+ * expose it as a public constant.
+ */
+internal val CCCD_DESCRIPTOR_UUID: UUID =
+    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")

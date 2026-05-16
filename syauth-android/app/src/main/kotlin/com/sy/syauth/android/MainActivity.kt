@@ -29,6 +29,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -69,15 +70,20 @@ import com.sy.syauth.android.bg.EXTRA_CHALLENGE_B64
 import com.sy.syauth.android.bg.EXTRA_HOSTNAME
 import com.sy.syauth.android.bg.EXTRA_PEER_ID
 import com.sy.syauth.android.bg.GattResponseSender
+import com.sy.syauth.android.bg.SyauthGattHostService
 import com.sy.syauth.android.pair.PairingScreen
 import com.sy.syauth.android.pair.PairingViewModel
-import com.sy.syauth.android.pair.api.BondPersister
 import com.sy.syauth.android.pair.api.LescResult
 import com.sy.syauth.android.pair.api.PairBackend
 import com.sy.syauth.android.pair.api.PeerHandle
 import com.sy.syauth.android.pair.api.PickPeerResult
 import com.sy.syauth.android.pair.impl.ReflectionBondRemover
 import com.sy.syauth.android.pair.impl.UniffiOobCalculator
+import com.sy.syauth.android.provision.BOOTSTRAP_NO_BOND_TOAST
+import com.sy.syauth.android.provision.BondRecord
+import com.sy.syauth.android.provision.BondStore
+import com.sy.syauth.android.provision.DiskBondPersister
+import com.sy.syauth.android.provision.bootstrapBond
 import uniffi.syauth_mobile.oobCodeForBond
 
 /**
@@ -172,9 +178,30 @@ class MainActivity : FragmentActivity() {
      */
     internal val approvePayload = mutableStateOf<ApprovePayload?>(null)
 
+    /**
+     * Bond record resolved by the v0.1 demo bootstrap. The approve
+     * route reads this to construct the Ed25519 signing key
+     * provider (the seed lives in plaintext in app private storage;
+     * the canonical Keystore-backed path is the v0.2 follow-up).
+     *
+     * Held in a `mutableStateOf` so Compose re-renders if a future
+     * code path mutates the bond mid-session (none does today; the
+     * field is read-once).
+     */
+    internal val bondRecord = mutableStateOf<BondRecord?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         approvePayload.value = parseApprovePayload(intent)
+        val record = runCatching { bootstrapBond(this) }.getOrNull()
+        bondRecord.value = record
+        if (record == null) {
+            Toast.makeText(this, BOOTSTRAP_NO_BOND_TOAST, Toast.LENGTH_LONG).show()
+        } else {
+            runCatching {
+                startForegroundService(Intent(this, SyauthGattHostService::class.java))
+            }
+        }
         setContent {
             MaterialTheme {
                 Surface(
@@ -184,6 +211,7 @@ class MainActivity : FragmentActivity() {
                     SyauthApp(
                         activity = this,
                         approvePayload = approvePayload.value,
+                        bondRecord = bondRecord.value,
                     )
                 }
             }
@@ -198,7 +226,11 @@ class MainActivity : FragmentActivity() {
 }
 
 @Composable
-private fun SyauthApp(activity: FragmentActivity, approvePayload: ApprovePayload?) {
+private fun SyauthApp(
+    activity: FragmentActivity,
+    approvePayload: ApprovePayload?,
+    bondRecord: BondRecord?,
+) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = NavRoutes.HOME) {
         composable(NavRoutes.HOME) {
@@ -236,7 +268,7 @@ private fun SyauthApp(activity: FragmentActivity, approvePayload: ApprovePayload
             if (approvePayload == null) {
                 Text(text = "Approve destination (no payload).")
             } else {
-                ApproveRoute(activity = activity, payload = approvePayload)
+                ApproveRoute(activity = activity, payload = approvePayload, bondRecord = bondRecord)
             }
         }
     }
@@ -261,8 +293,13 @@ private fun NavigateOnApprovePayload(
 }
 
 @Composable
-private fun ApproveRoute(activity: FragmentActivity, payload: ApprovePayload) {
-    val viewModel = remember(payload) {
+private fun ApproveRoute(
+    activity: FragmentActivity,
+    payload: ApprovePayload,
+    bondRecord: BondRecord?,
+) {
+    val seed = bondRecord?.phoneSigningKeySeed ?: ByteArray(ED25519_SEED_LEN)
+    val viewModel = remember(payload, bondRecord) {
         ApproveViewModel(
             hostname = payload.hostname,
             challengeFrame = payload.challengeBytes,
@@ -271,12 +308,12 @@ private fun ApproveRoute(activity: FragmentActivity, payload: ApprovePayload) {
                 activity = activity,
                 hostname = payload.hostname,
             ),
-            // The Ed25519 seed provider is wired to an in-memory zero
-            // seed for the v0.1 lifecycle; the Keystore-wrapped seed
-            // follow-up (tracked in docs/android-setup.md) replaces this
-            // with a Cipher-init flow. Loaded eagerly so the seed bytes
-            // never live in a long-running buffer.
-            signingKeyProvider = InMemorySigningKeyProvider(ByteArray(ED25519_SEED_LEN)),
+            // v0.1 demo: the Ed25519 seed lives in plaintext under
+            // app private storage and is loaded eagerly by the
+            // bootstrap. The canonical Keystore-wrapped seed path
+            // (documented under "Provision-file bootstrap (v0.1 demo)"
+            // in docs/android-setup.md) replaces this in v0.2.
+            signingKeyProvider = InMemorySigningKeyProvider(seed),
             wireSigner = UniffiWireSigner(),
             responseSender = GattResponseSender(peerId = payload.peerId),
         )
@@ -370,7 +407,9 @@ private object PairingViewModelFactoryHolder {
                 return PairingViewModel(
                     backend = StubPairBackend(),
                     oobCalculator = UniffiOobCalculator(),
-                    bondPersister = InMemoryBondPersister(),
+                    bondPersister = DiskBondPersister(
+                        bondStore = BondStore(context.filesDir),
+                    ),
                     bondRemover = ReflectionBondRemover(adapter = adapter),
                     companionAssociator = associator,
                 ) as T
@@ -398,16 +437,8 @@ private class StubPairBackend : PairBackend {
         LescResult.Failed("pairing backend not yet implemented (post-S-018)")
 }
 
-/**
- * Placeholder [BondPersister] for S-016 — the real bond-keystore wiring
- * will be added once the UniFFI surface exposes a "save bond" function
- * (future work, not in any current roadmap item). For now the persister
- * accepts every call and stores nothing; the ViewModel-driven security
- * invariants ("persister NEVER called on Failed path") still hold
- * because the ViewModel is the only caller.
- */
-private class InMemoryBondPersister : BondPersister {
-    override fun persist(record: com.sy.syauth.android.pair.api.BondRecord) {
-        // No-op: persistence is deferred to a future UniFFI-exposed store.
-    }
-}
+// The previous `InMemoryBondPersister` no-op was replaced by the
+// disk-backed [com.sy.syauth.android.provision.DiskBondPersister].
+// See `provision/DiskBondPersister.kt` for the v0.1 behaviour
+// (writes a stub provision record into the BondStore so a future
+// LESC backend has somewhere to land its full record).
