@@ -17,6 +17,7 @@ pub mod install_pam;
 pub mod list;
 pub mod oob;
 pub mod pair;
+pub mod provision;
 pub mod revoke;
 pub mod status;
 pub mod uninstall_pam;

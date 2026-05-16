@@ -51,6 +51,17 @@ async-trait = "0.1"
 # `time::OffsetDateTime` for the Bond.created_at field. Same pin as
 # `syauth-core` so the workspace resolves to a single version.
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+# `provision-test` subcommand: random Ed25519 keypair generation and
+# random 32-byte bond_key. `rand` re-exports a CSPRNG via `OsRng`. Pinned
+# to the same minor `ed25519-dalek` already pulls in transitively so the
+# workspace resolves a single version.
+rand = "0.8"
+# Hex encoding for the transport-package fields (private key, pubkey,
+# bond_key); same pin as the dev-dep `hex` in `syauth-core`.
+hex = "0.4"
+# Serde + toml for writing the transport package the phone consumes.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -466,15 +466,77 @@ fn first_bonded(store: &BondStore) -> Option<&Bond> {
     store.list().iter().find(|b| matches!(b.status, BondStatus::Bonded))
 }
 
-/// Look up the 32-byte bond_key for `peer_id` from the configured
-/// keystore. Returns the kebab-token reason for the `AuthErr` if the
-/// lookup fails.
+/// Subdirectory under `Config::bond_dir` that holds per-peer
+/// bond_key files. Mirrors the `KEYS_DIR_NAME` constant in
+/// `syauth_cli::provision`; if either side ever changes the layout,
+/// the other must follow. Pinned as a constant rather than imported
+/// across crate boundaries because syauth-pam intentionally does NOT
+/// depend on syauth-cli (the install graph for the .so doesn't need
+/// the CLI's tokio/bluer transitive closure).
+const BOND_KEY_DIR_NAME: &str = "keys";
+
+/// Per-peer bond_key file extension. `keys/<peer_id>.bin` is the file
+/// the desktop CLI's `provision-test` (and v0.2's real pair flow)
+/// writes; this constant keeps the two ends in sync.
+const BOND_KEY_FILE_EXT: &str = ".bin";
+
+/// Mode bits the on-disk bond_key file MUST have for the production
+/// path to accept it. 0600 (root:root, owner-only read) is the
+/// canonical syauth secrets perm — anything looser is a configuration
+/// error and we fail closed.
+const BOND_KEY_FILE_MODE_MASK: u32 = 0o077;
+
+/// Look up the 32-byte bond_key for `peer_id`.
+///
+/// Resolution order:
+///
+/// 1. Tests can install an [`InMemoryKeyStore`] via the
+///    `KEYSTORE_FOR_TESTS` slot; if `cfg.mock_peer_enabled` is set and
+///    a test store is present, look there first. This preserves the
+///    existing integration test surface unchanged.
+/// 2. Production reads from
+///    `<cfg.bond_dir>/keys/<peer_id>.bin`. The file MUST be exactly
+///    [`BOND_KEY_LEN`] bytes and have mode 0600 (no group/other
+///    permissions). Anything else is treated as `secret-not-found`
+///    rather than a more specific error to avoid leaking which
+///    boundary tripped.
+///
+/// Why not the kernel keyring or libsecret yet: the production-grade
+/// `KernelKeyring` / `SecretService` impls live in
+/// `crates/syauth-core/src/secrets.rs` but tying them into the PAM
+/// hot path (which runs as root, briefly, with no D-Bus session)
+/// requires session-keyring lifetime work we deferred to v0.2. A
+/// 0600 file in `/var/lib/syauth/keys/` is equivalent protection
+/// (root-only read) without the runtime-keyring complications, and
+/// makes the e2e demo runnable today.
 fn load_bond_key(cfg: &Config, peer_id: &str) -> Result<[u8; BOND_KEY_LEN], &'static str> {
-    let store = test_keystore(cfg).ok_or("secret-not-found")?;
-    let id = format!("{BOND_KEY_PREFIX}{peer_id}");
-    let secret = match store.get(&id) {
-        Ok(Some(v)) => v,
-        Ok(None) => return Err("secret-not-found"),
+    if let Some(store) = test_keystore(cfg) {
+        let id = format!("{BOND_KEY_PREFIX}{peer_id}");
+        if let Ok(Some(v)) = store.get(&id)
+            && v.len() == BOND_KEY_LEN
+        {
+            let mut bytes = [0u8; BOND_KEY_LEN];
+            bytes.copy_from_slice(&v);
+            return Ok(bytes);
+        }
+    }
+    load_bond_key_from_file(cfg, peer_id)
+}
+
+/// Read the bond_key from `<bond_dir>/keys/<peer_id>.bin` after
+/// validating mode bits and length.
+fn load_bond_key_from_file(cfg: &Config, peer_id: &str) -> Result<[u8; BOND_KEY_LEN], &'static str> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = cfg.bond_dir.join(BOND_KEY_DIR_NAME).join(format!("{peer_id}{BOND_KEY_FILE_EXT}"));
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Err("secret-not-found"),
+    };
+    if meta.permissions().mode() & BOND_KEY_FILE_MODE_MASK != 0 {
+        return Err("secret-not-found");
+    }
+    let secret = match std::fs::read(&path) {
+        Ok(v) => v,
         Err(_) => return Err("secret-not-found"),
     };
     if secret.len() != BOND_KEY_LEN {

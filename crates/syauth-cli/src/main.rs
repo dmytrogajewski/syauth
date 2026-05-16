@@ -22,6 +22,7 @@ use syauth_cli::{
     install_pam::{self, InstallOpts, InstallOutcome},
     list::run_list,
     pair::{AdapterInfo, LescOutcome, ListOpts, PairBackend, PairCandidate, PairError, PairOpts, PairingPhase, run_pair},
+    provision::{ProvisionOpts, PROVISION_SUCCESS_BANNER, run_provision_test},
     revoke::{RevokeOpts, run_revoke},
     status::{StatusOpts, run_status},
     uninstall_pam::{self, UninstallOpts, UninstallOutcome},
@@ -59,6 +60,11 @@ enum Cmd {
     InstallPam(InstallOpts),
     /// Restore a PAM service file from its `.bak` and remove the bak.
     UninstallPam(UninstallOpts),
+    /// Generate a pre-seeded test bond + emit the provision package the
+    /// phone consumes via `adb push`. Bridges the still-stubbed LESC
+    /// flow so the end-to-end unlock path can be demonstrated on real
+    /// hardware in v0.1.
+    ProvisionTest(ProvisionOpts),
 }
 
 fn main() -> ExitCode {
@@ -95,7 +101,21 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Status(opts) => run_status_cli(&opts).await,
         Cmd::InstallPam(opts) => run_install(&opts),
         Cmd::UninstallPam(opts) => run_uninstall(&opts),
+        Cmd::ProvisionTest(opts) => run_provision_cli(&opts),
     }
+}
+
+fn run_provision_cli(opts: &ProvisionOpts) -> Result<()> {
+    let outcome = run_provision_test(opts)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{PROVISION_SUCCESS_BANNER}")?;
+    writeln!(stdout, "    peer_id:      {}", outcome.peer_id)?;
+    writeln!(stdout, "    bond record:  {}", outcome.bond_path.display())?;
+    writeln!(stdout, "    bond key:     {}", outcome.bond_key_path.display())?;
+    writeln!(stdout, "    provision:    {}", outcome.provision_path.display())?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Next: adb push {} /sdcard/Download/", outcome.provision_path.display())?;
+    Ok(())
 }
 
 fn run_revoke_cli(opts: &RevokeOpts) -> Result<()> {
