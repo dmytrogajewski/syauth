@@ -2081,6 +2081,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hkdf 0.13.0",
+ "rand 0.8.6",
  "sha2 0.11.0",
  "syauth-core",
  "thiserror",

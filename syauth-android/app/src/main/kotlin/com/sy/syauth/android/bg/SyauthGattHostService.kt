@@ -184,7 +184,14 @@ public class SyauthGattHostService : Service() {
             Log.w(HOST_SERVICE_LOG_TAG, "frame verify failed peer=$peerId; dropping")
             return
         }
-        val effectivePeerId = if (peerId.isEmpty()) record.peerId else peerId
+        // The BLE callback parameter `peerId` carries the desktop's MAC
+        // address, not the bond's logical peer_id. Use the bond's
+        // peer_id in the dispatched intent so the approve route's
+        // `GattResponseSender.lookup(peerId)` resolves to the
+        // transport we registered under `record.peerId`. The MAC has
+        // no business being on the wire — the bond key is the
+        // cryptographic identity.
+        val effectivePeerId = record.peerId
         val intent = ApproveNotification.buildApproveIntent(
             context = this,
             challengeBytes = frameBytes,
@@ -326,8 +333,21 @@ private class BluetoothGattServerHandle private constructor() : GattServerHandle
     private val connectedDevice: AtomicReference<BluetoothDevice?> = AtomicReference(null)
     private val responseChar: AtomicReference<BluetoothGattCharacteristic?> = AtomicReference(null)
     private val writeHandler: AtomicReference<((String, ByteArray) -> Unit)?> = AtomicReference(null)
+    private val serviceAddLatch: java.util.concurrent.CountDownLatch = java.util.concurrent.CountDownLatch(1)
 
     private val callback: BluetoothGattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            if (status == BluetoothGatt.GATT_SUCCESS && service.uuid == SYAUTH_GATT_SERVICE_UUID) {
+                Log.i(HOST_SERVICE_LOG_TAG, "gatt-service registered uuid=${service.uuid}")
+            } else {
+                Log.w(
+                    HOST_SERVICE_LOG_TAG,
+                    "gatt-service add failed status=$status uuid=${service.uuid}",
+                )
+            }
+            serviceAddLatch.countDown()
+        }
+
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
@@ -436,7 +456,26 @@ private class BluetoothGattServerHandle private constructor() : GattServerHandle
         val responseChars = service.characteristics.filter { it.uuid == SYAUTH_RESPONSE_CHAR_UUID }
         responseChars.firstOrNull()?.let { responseChar.set(it) }
         val server = serverRef.get() ?: return false
-        return server.addService(service)
+        val queued = server.addService(service)
+        if (!queued) return false
+        // BluetoothGattServer.addService is async; onServiceAdded fires
+        // when the GATT DB is actually populated. Block here so the
+        // controller (and the advertise that follows in
+        // BluerlessGattServerController.start) only proceeds once the
+        // service is queryable — otherwise the desktop's bluer client
+        // wins the race, connects, finds an empty service list, and
+        // disconnects.
+        val ready = serviceAddLatch.await(
+            SERVICE_ADD_TIMEOUT_MILLIS,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+        )
+        if (!ready) {
+            Log.w(
+                HOST_SERVICE_LOG_TAG,
+                "onServiceAdded did not fire within ${SERVICE_ADD_TIMEOUT_MILLIS}ms; advertising anyway",
+            )
+        }
+        return true
     }
 
     override fun setWriteHandler(handler: ((String, ByteArray) -> Unit)?) {
@@ -489,6 +528,14 @@ private class BluetoothGattServerHandle private constructor() : GattServerHandle
  * desktop overwrites this when it calls `Characteristic::notify()`.
  */
 private val CCCD_DEFAULT_VALUE: ByteArray = byteArrayOf(0x00, 0x00)
+
+/**
+ * Wall-clock budget for `BluetoothGattServer.onServiceAdded` to fire
+ * after `addService`. On a healthy adapter this lands in well under
+ * 100ms; the 2-second cap is defensive so a misbehaving stack does
+ * not hang service start indefinitely.
+ */
+private const val SERVICE_ADD_TIMEOUT_MILLIS: Long = 2_000L
 
 /**
  * Production adapter wrapping `BluetoothLeAdvertiser`.

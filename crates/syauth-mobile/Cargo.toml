@@ -66,6 +66,10 @@ sha2 = "0.11"
 # (KAT loader), so adding it here introduces no new audit surface.
 hex = "0.4"
 
+# OS RNG for `build_response_frame`'s fresh response-frame nonce. `rand`'s
+# `OsRng` wraps `getrandom`. Already in the workspace via `syauth-cli`.
+rand = "0.8"
+
 [build-dependencies]
 # Mirrors prrr-mobile: same crate, same version, same `features = ["build"]`.
 # The build feature pulls in the UDL parser + scaffolding generator that

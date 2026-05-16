@@ -23,10 +23,15 @@ package com.sy.syauth.android.approve
  * fun` exists in this file or any other under `syauth-android/`.
  */
 public class UniffiWireSigner : WireSigner {
-    override suspend fun signWire(seed: ByteArray, frameBytes: ByteArray): WireSignResult {
+    override suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult {
         return try {
-            val sig = uniffi.syauth_mobile.signChallengeResponse(seed, frameBytes)
-            WireSignResult.Ok(sig)
+            // `buildResponseFrame` produces the full encoded response
+            // frame the desktop's `Frame::decode` expects (version |
+            // nonce | signature payload | MAC tag). Earlier S-017
+            // returned `signChallengeResponse`'s raw 64-byte signature,
+            // which the wire decoder rejected as `wrong-version`.
+            val encoded = uniffi.syauth_mobile.buildResponseFrame(bondKey, seed, frameBytes)
+            WireSignResult.Ok(encoded)
         } catch (t: Throwable) {
             WireSignResult.Failure(t.message ?: t::class.java.simpleName)
         }

@@ -60,8 +60,8 @@ pub mod implementation;
 
 pub use implementation::{
     ED25519_SECRET_KEY_LEN, ED25519_SIGNATURE_LEN, HKDF_INFO_OOB_V1, INVITE_PUBKEY_LEN, INVITE_QUERY_KEY_HOST, INVITE_QUERY_KEY_PUBKEY,
-    INVITE_URI_HOST_PATH, INVITE_URI_SCHEME, Invite, MOBILE_BOND_KEY_LEN, MobileError, OOB_WORD_COUNT, OOB_WORDS, oob_code_for_bond,
-    parse_invite_uri, sign_challenge_response, verify_challenge_frame,
+    INVITE_URI_HOST_PATH, INVITE_URI_SCHEME, Invite, MOBILE_BOND_KEY_LEN, MobileError, OOB_WORD_COUNT, OOB_WORDS, build_response_frame,
+    oob_code_for_bond, parse_invite_uri, sign_challenge_response, verify_challenge_frame,
 };
 
 /// Library version. Surfaced through UniFFI so the Kotlin caller can log

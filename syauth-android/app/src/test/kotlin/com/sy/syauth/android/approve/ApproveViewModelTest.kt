@@ -50,6 +50,7 @@ class ApproveViewModelTest {
 
     private val cannedWireSignature: ByteArray = ByteArray(WIRE_SIGNATURE_LEN) { it.toByte() }
     private val cannedSeed: ByteArray = ByteArray(SEED_LEN) { (it + 1).toByte() }
+    private val cannedBondKey: ByteArray = ByteArray(SEED_LEN) { (it + 0x40).toByte() }
     private val challengeFrame: ByteArray = ByteArray(CHALLENGE_LEN) { (0xA0 + it).toByte() }
     private val hostname: String = "dell-precision"
 
@@ -246,6 +247,7 @@ class ApproveViewModelTest {
     ): ApproveViewModel = ApproveViewModel(
         hostname = hostname,
         challengeFrame = challengeFrame,
+        bondKey = cannedBondKey,
         keystoreSigner = FakeKeystoreSigner(),
         biometricPresenter = biometricPresenter,
         signingKeyProvider = signingKeyProvider,
@@ -301,7 +303,7 @@ private class FakeBiometricPresenter(
 private class FakeWireSigner(
     private val behaviour: (ByteArray, ByteArray) -> WireSignResult,
 ) : WireSigner {
-    override suspend fun signWire(seed: ByteArray, frameBytes: ByteArray): WireSignResult =
+    override suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult =
         behaviour(seed, frameBytes)
 }
 

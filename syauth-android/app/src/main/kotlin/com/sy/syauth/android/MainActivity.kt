@@ -340,10 +340,12 @@ private fun ApproveRoute(
     bondRecord: BondRecord?,
 ) {
     val seed = bondRecord?.phoneSigningKeySeed ?: ByteArray(ED25519_SEED_LEN)
+    val bondKey = bondRecord?.bondKey ?: ByteArray(ED25519_SEED_LEN)
     val viewModel = remember(payload, bondRecord) {
         ApproveViewModel(
             hostname = payload.hostname,
             challengeFrame = payload.challengeBytes,
+            bondKey = bondKey,
             keystoreSigner = AndroidKeystoreSigner(),
             biometricPresenter = AndroidBiometricPresenter(
                 activity = activity,

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Default approve-window length. SPEC §4.3 budget for human reaction. */
 public const val DEFAULT_TIMEOUT_MILLIS: Long = 30_000L
@@ -91,13 +92,18 @@ public sealed class ApproveUiState {
  * class init; importing it in JVM-only unit tests fails with
  * `UnsatisfiedLinkError` on hosts without the AAR.
  */
+// NOTE: WireSigner now returns the fully-encoded response frame
+// the desktop's `pam_syauth` recv_frame decodes (version + nonce +
+// signature payload + MAC tag). Earlier S-017 returned only the
+// 64-byte signature; v0.1 wires the full frame so the on-wire
+// contract matches the desktop's `Frame::decode`.
 public interface WireSigner {
     /**
      * Sign [frameBytes] with [seed] and return the 64-byte Ed25519
      * signature. Implementations MUST NOT throw — every failure becomes
      * a typed [WireSignResult.Failure].
      */
-    public suspend fun signWire(seed: ByteArray, frameBytes: ByteArray): WireSignResult
+    public suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult
 }
 
 /** Typed result of a [WireSigner.signWire] call. */
@@ -159,6 +165,7 @@ public interface Clock {
 public class ApproveViewModel(
     public val hostname: String,
     public val challengeFrame: ByteArray,
+    private val bondKey: ByteArray,
     private val keystoreSigner: KeystoreSignerBackend,
     private val biometricPresenter: BiometricPresenter,
     private val signingKeyProvider: SigningKeyProvider,
@@ -270,7 +277,14 @@ public class ApproveViewModel(
                 return
             }
 
-        val biometricResult = biometricPresenter.authenticate(signature)
+        // BiometricPrompt.authenticate must be called on the main
+        // thread because FragmentManager.executePendingTransactions
+        // (called by the biometric library) requires it. Hop to the
+        // main dispatcher just for the prompt; the surrounding flow
+        // stays on `ioDispatcher` for Keystore / network work.
+        val biometricResult = withContext(Dispatchers.Main) {
+            biometricPresenter.authenticate(signature)
+        }
         if (biometricResult is BiometricResult.Unavailable) {
             transitionToDenied(DenialReason.BiometricUnavailable)
             return
@@ -305,7 +319,7 @@ public class ApproveViewModel(
             return
         }
 
-        val wireResult = wireSigner.signWire(seedResult.seed, challengeFrame)
+        val wireResult = wireSigner.signWire(bondKey, seedResult.seed, challengeFrame)
         if (wireResult !is WireSignResult.Ok) {
             val msg = (wireResult as WireSignResult.Failure).reason
             emitSignError(msg)

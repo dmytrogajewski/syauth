@@ -20,9 +20,10 @@
 //!    `src/lib.rs` documents the exception.
 
 use hkdf::Hkdf;
+use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
 use syauth_core::{
-    BOND_KEY_BYTES, Frame, MAC_TAG_LEN, Signature, SigningKey, VerifyingKey, compute_tag, sign_frame, verify_frame, verify_tag,
+    BOND_KEY_BYTES, Frame, MAC_TAG_LEN, NONCE_LEN, SYAUTH_WIRE_VERSION_V1, Signature, SigningKey, VerifyingKey, compute_tag, sign_frame, verify_frame, verify_tag,
 };
 use thiserror::Error;
 
@@ -305,6 +306,72 @@ pub fn sign_challenge_response(signing_key: Vec<u8>, frame_bytes: Vec<u8>) -> Re
         reason: format!("ed25519 sign failed: {e}"),
     })?;
     Ok(sig.to_bytes().to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// 3b. build_response_frame
+// ---------------------------------------------------------------------------
+
+/// Build the encoded wire-format response frame the desktop's
+/// `pam_syauth` expects. Wraps the Ed25519 signature over the challenge
+/// in a frame whose payload is `signature || empty` and whose body is
+/// MAC-tagged under `bond_key`.
+///
+/// Inputs:
+/// * `bond_key` — 32-byte shared secret used for the MAC tag.
+/// * `signing_key` — 32-byte Ed25519 secret seed; the phone's identity.
+/// * `challenge_frame_bytes` — full wire-format challenge frame the
+///   desktop just wrote to the challenge characteristic.
+///
+/// Returns the encoded response-frame bytes the phone writes back on
+/// the response characteristic.
+///
+/// # Errors
+///
+/// - [`MobileError::InvalidKey`] on a wrong-length `bond_key` /
+///   `signing_key`.
+/// - [`MobileError::BadFrame`] if `Frame::decode` rejects
+///   `challenge_frame_bytes`.
+/// - [`MobileError::SignFailed`] on any signature failure.
+pub fn build_response_frame(bond_key: Vec<u8>, signing_key: Vec<u8>, challenge_frame_bytes: Vec<u8>) -> Result<Vec<u8>, MobileError> {
+    let bond_key_arr = bond_key_array(&bond_key)?;
+    if signing_key.len() != ED25519_SECRET_KEY_LEN {
+        return Err(MobileError::InvalidKey {
+            reason: format!("signing_key must be {ED25519_SECRET_KEY_LEN} bytes, got {}", signing_key.len()),
+        });
+    }
+    let mut seed = [0u8; ED25519_SECRET_KEY_LEN];
+    seed.copy_from_slice(&signing_key);
+    let sk = SigningKey::from_bytes(&seed);
+    let challenge = Frame::decode(&challenge_frame_bytes).map_err(|e| MobileError::BadFrame {
+        reason: format!("challenge decode failed: {e}"),
+    })?;
+    let sig = sign_frame(&sk, &challenge).map_err(|e| MobileError::SignFailed {
+        reason: format!("ed25519 sign failed: {e}"),
+    })?;
+
+    let mut response_nonce = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut response_nonce);
+    let mut payload: Vec<u8> = Vec::with_capacity(ED25519_SIGNATURE_LEN);
+    payload.extend_from_slice(&sig.to_bytes());
+
+    let mut body: Vec<u8> = Vec::with_capacity(1 + NONCE_LEN + payload.len());
+    body.push(SYAUTH_WIRE_VERSION_V1);
+    body.extend_from_slice(&response_nonce);
+    body.extend_from_slice(&payload);
+    let tag = compute_tag(&bond_key_arr, &body);
+
+    let response_frame = Frame {
+        version: SYAUTH_WIRE_VERSION_V1,
+        nonce: response_nonce,
+        payload,
+        tag,
+    };
+    let mut out: Vec<u8> = Vec::new();
+    response_frame.encode(&mut out).map_err(|e| MobileError::SignFailed {
+        reason: format!("response frame encode failed: {e}"),
+    })?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

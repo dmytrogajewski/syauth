@@ -30,6 +30,12 @@ namespace syauth_mobile {
   [Throws=MobileError]
   bytes sign_challenge_response(bytes signing_key, bytes frame_bytes);
 
+  // Build the full encoded response frame the desktop's `pam_syauth`
+  // recv_frame expects. Wraps the Ed25519 signature over the challenge
+  // in a wire-format frame whose body is MAC-tagged under `bond_key`.
+  [Throws=MobileError]
+  bytes build_response_frame(bytes bond_key, bytes signing_key, bytes challenge_frame_bytes);
+
   // Derive the 4-word emoji-prefixed OOB code for `bond_key`. Mirrors
   // `crates/syauth-cli/src/oob.rs::oob_code_for_bond`.
   [Throws=MobileError]

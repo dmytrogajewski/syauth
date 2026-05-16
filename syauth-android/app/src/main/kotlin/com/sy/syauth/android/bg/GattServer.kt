@@ -78,12 +78,22 @@ public val SYAUTH_RESPONSE_CHAR_UUID: UUID =
  * platform statics that are not Kotlin compile-time constants.
  */
 internal object GattPermissions {
-    /** Write requires an authenticated, encrypted link. */
+    /**
+     * v0.1 demo: plain WRITE permission (no link encryption).
+     *
+     * The frame layer (BLAKE3-keyed MAC under the shared bond_key +
+     * Ed25519-signed responses) is the authenticated boundary; link
+     * encryption is defense-in-depth that v0.2 reinstates alongside
+     * LESC pairing. Until then, requiring encryption blocks the
+     * desktop's bluer GATT client because it never bonded with the
+     * phone — operating mode lands on plaintext writes whose payload
+     * itself carries the cryptographic protection.
+     */
     val WRITE_ENCRYPTED: Int =
-        BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED
-    /** Read requires an authenticated, encrypted link. */
+        BluetoothGattCharacteristic.PERMISSION_WRITE
+    /** v0.1 demo: plain READ permission. Same rationale as WRITE. */
     val READ_ENCRYPTED: Int =
-        BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
+        BluetoothGattCharacteristic.PERMISSION_READ
 }
 
 /**
@@ -351,8 +361,8 @@ public class BluerlessGattServerController(
         // property to drive the actual stream.
         val cccd = BluetoothGattDescriptor(
             CCCD_DESCRIPTOR_UUID,
-            BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or
-                BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED,
+            BluetoothGattDescriptor.PERMISSION_READ or
+                BluetoothGattDescriptor.PERMISSION_WRITE,
         )
         response.addDescriptor(cccd)
         service.addCharacteristic(challenge)

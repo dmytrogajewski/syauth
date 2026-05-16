@@ -35,6 +35,7 @@ class ApproveScreenTest {
         val viewModel = ApproveViewModel(
             hostname = TEST_HOSTNAME,
             challengeFrame = ByteArray(CHALLENGE_LEN) { it.toByte() },
+            bondKey = ByteArray(SEED_LEN) { 0x02 },
             keystoreSigner = TestKeystoreSigner(),
             biometricPresenter = NoOpBiometricPresenter,
             signingKeyProvider = InMemorySigningKeyProvider(ByteArray(SEED_LEN) { 0x01 }),
@@ -107,7 +108,7 @@ private object NoOpBiometricPresenter : BiometricPresenter {
 }
 
 private object NoOpWireSigner : WireSigner {
-    override suspend fun signWire(seed: ByteArray, frameBytes: ByteArray): WireSignResult =
+    override suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult =
         WireSignResult.Failure("test-no-op")
 }
 
