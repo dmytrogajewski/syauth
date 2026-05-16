@@ -16,18 +16,24 @@ namespace syauth_mobile {
   // Verify a wire-format challenge frame using the per-bond BLAKE3 key.
   // Returns the challenge payload (the bytes the phone must sign) on
   // success, or VerifyFailed / BadFrame / InvalidKey on failure.
+  //
+  // Byte fields use UDL `bytes` (maps to Kotlin `ByteArray` and Rust
+  // `Vec<u8>`) rather than `sequence<u8>` (which maps to
+  // `List<kotlin.UByte>` in UniFFI 0.29 — costly to convert at every
+  // call site and incompatible with the Android BLE / Keystore /
+  // PendingIntent byte-array surfaces the app needs to interop with).
   [Throws=MobileError]
-  sequence<u8> verify_challenge_frame(sequence<u8> bond_key, sequence<u8> frame_bytes);
+  bytes verify_challenge_frame(bytes bond_key, bytes frame_bytes);
 
   // Sign the wire-format frame body with the phone's Ed25519 secret key.
   // Returns the 64-byte Ed25519 signature.
   [Throws=MobileError]
-  sequence<u8> sign_challenge_response(sequence<u8> signing_key, sequence<u8> frame_bytes);
+  bytes sign_challenge_response(bytes signing_key, bytes frame_bytes);
 
   // Derive the 4-word emoji-prefixed OOB code for `bond_key`. Mirrors
   // `crates/syauth-cli/src/oob.rs::oob_code_for_bond`.
   [Throws=MobileError]
-  sequence<string> oob_code_for_bond(sequence<u8> bond_key);
+  sequence<string> oob_code_for_bond(bytes bond_key);
 };
 
 // Typed error variants surfaced to Kotlin/Swift. Every `reason` is a
@@ -45,5 +51,5 @@ interface MobileError {
 // Parsed invite record.
 dictionary Invite {
   string host_name;
-  sequence<u8> host_pubkey;
+  bytes host_pubkey;
 };

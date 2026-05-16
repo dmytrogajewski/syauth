@@ -124,7 +124,10 @@ public class SyauthCompanionService : CompanionDeviceService() {
      * bonded peers in v0.2; for v0.1 only one slot is used at a
      * time but the data structure scales without refactor.
      */
-    private val controllers: ConcurrentHashMap<Long, GattServerController> =
+    // Key type is `Int` (not `Long`): `AssociationInfo.getId()` on
+    // Android API 31-36 returns a primitive `int`. The Kotlin type
+    // mapping is `Int`, so the map key follows.
+    private val controllers: ConcurrentHashMap<Int, GattServerController> =
         ConcurrentHashMap()
 
     override fun onDeviceAppeared(associationInfo: AssociationInfo) {

@@ -1,0 +1,31 @@
+# UniFFI 0.29 bindings config — overrides defaults the CLI-driven
+# `uniffi-bindgen generate` would otherwise infer from the UDL alone.
+#
+# Roadmap item S-014 originally relied on UniFFI's defaults. Real-device
+# testing on a Samsung Galaxy / Android 16 surfaced two issues:
+#
+#   1. `findLibraryName(...)` defaulted to `uniffi_<namespace>`, so the
+#      Kotlin runtime tried to dlopen `libuniffi_syauth_mobile.so`. The
+#      cdylib that `cargo build` produces is `libsyauth_mobile.so` (per
+#      the crate's `[lib] name`), so the call threw `UnsatisfiedLinkError:
+#      dlopen failed: library "libuniffi_syauth_mobile.so" not found`.
+#   2. Renaming the cdylib to `libuniffi_syauth_mobile.so` (via
+#      `[lib] name`) fixed the dlopen but caused the Rust scaffolding
+#      symbols to be exported with a doubled `uniffi_uniffi_` prefix,
+#      breaking every function lookup.
+#
+# The clean fix is to keep the Rust crate's `[lib] name = "syauth_mobile"`
+# (matching the UDL namespace) and pin the Kotlin-side dlopen target
+# here via `cdylib_name`. The generator then emits
+# `findLibraryName(...) = "syauth_mobile"` and the runtime resolves to
+# `libsyauth_mobile.so` cleanly.
+#
+# prrr-mobile sidesteps this entirely by invoking the UniFFI library
+# API (`uniffi::generate_bindings`) rather than the CLI; that path
+# infers `cdylib_name` from the parent Cargo.toml's `[lib] name`
+# automatically. syauth uses the CLI for consistency with
+# `scripts/build_aar.sh`, so the override has to live here.
+
+[bindings.kotlin]
+cdylib_name = "syauth_mobile"
+package_name = "uniffi.syauth_mobile"
