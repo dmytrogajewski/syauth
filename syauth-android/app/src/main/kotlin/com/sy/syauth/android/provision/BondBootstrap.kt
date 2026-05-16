@@ -23,13 +23,13 @@ public const val BOOTSTRAP_LOG_TAG: String = "syauth.bootstrap"
 
 /** Message surfaced as a toast when no bond is available on first launch. */
 public const val BOOTSTRAP_NO_BOND_TOAST: String =
-    "No syauth bond — adb push syauth-provision.toml to /sdcard/Download/ and relaunch"
+    "No syauth bond — adb push syauth-provision.toml to the app's external-private dir and relaunch"
 
 /**
  * Resolve the bond record. Returns `null` when neither the on-disk
- * store nor the Downloads provision file is present (or when either
- * parse fails — the routine logs and treats parse failure as
- * "no bond" so a corrupt file never crashes the activity).
+ * store nor the provision file is present (or when either parse
+ * fails — the routine logs and treats parse failure as "no bond" so
+ * a corrupt file never crashes the activity).
  */
 public fun bootstrapBond(context: Context): BondRecord? {
     val store = BondStore(context.filesDir)
@@ -40,13 +40,13 @@ public fun bootstrapBond(context: Context): BondRecord? {
         Log.i(BOOTSTRAP_LOG_TAG, "bond loaded from on-disk store")
         return existing
     }
-    val provisioned = runCatching { loadProvisionFromDownloads() }
+    val provisioned = runCatching { loadProvisionFromDownloads(context) }
         .onFailure {
             Log.w(BOOTSTRAP_LOG_TAG, "provision file present but parse failed: ${it.message}")
         }
         .getOrNull()
     if (provisioned == null) {
-        Log.i(BOOTSTRAP_LOG_TAG, "no provision file in Downloads; bootstrap is null")
+        Log.i(BOOTSTRAP_LOG_TAG, "no provision file pushed; bootstrap is null")
         return null
     }
     val saved = runCatching { store.save(provisioned) }
@@ -60,7 +60,7 @@ public fun bootstrapBond(context: Context): BondRecord? {
     // Remove the source file ONLY after the persisted copy is on disk.
     // If the delete fails we still proceed — the bond is usable;
     // surfacing a warning is enough.
-    val source = provisionFilePath()
+    val source = provisionFilePath(context)
     if (source.exists() && !source.delete()) {
         Log.w(BOOTSTRAP_LOG_TAG, "could not delete consumed provision file: $source")
     }

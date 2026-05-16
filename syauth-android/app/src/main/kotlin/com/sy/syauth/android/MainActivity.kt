@@ -22,15 +22,20 @@
 // grep guard in `make android-test`.
 package com.sy.syauth.android
 
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -190,6 +195,42 @@ class MainActivity : FragmentActivity() {
      */
     internal val bondRecord = mutableStateOf<BondRecord?>(null)
 
+    /**
+     * Runtime permission gate for the foreground GATT host service.
+     * Android 14 enforces that a `connectedDevice`-type foreground
+     * service can only start when the caller holds at least one of
+     * `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` / `BLUETOOTH_SCAN`
+     * at runtime. The manifest declaration is necessary but not
+     * sufficient — the user must grant the runtime dialog. We request
+     * all three so the service start always lands.
+     */
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val anyGranted = grants.values.any { it }
+        if (anyGranted) {
+            startGattHostServiceIfBonded()
+        } else {
+            Log.w(PERMISSION_LOG_TAG, "BLE runtime permissions denied; host service not started")
+        }
+    }
+
+    private fun startGattHostServiceIfBonded() {
+        if (bondRecord.value == null) return
+        runCatching {
+            startForegroundService(Intent(this, SyauthGattHostService::class.java))
+        }.onFailure {
+            Log.w(PERMISSION_LOG_TAG, "startForegroundService threw: ${it.message}")
+        }
+    }
+
+    private fun haveAnyBluetoothRuntimePermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return BLUETOOTH_RUNTIME_PERMISSIONS.any { perm ->
+            ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         approvePayload.value = parseApprovePayload(intent)
@@ -197,10 +238,10 @@ class MainActivity : FragmentActivity() {
         bondRecord.value = record
         if (record == null) {
             Toast.makeText(this, BOOTSTRAP_NO_BOND_TOAST, Toast.LENGTH_LONG).show()
+        } else if (haveAnyBluetoothRuntimePermission()) {
+            startGattHostServiceIfBonded()
         } else {
-            runCatching {
-                startForegroundService(Intent(this, SyauthGattHostService::class.java))
-            }
+            bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
         }
         setContent {
             MaterialTheme {
@@ -323,6 +364,21 @@ private fun ApproveRoute(
 
 /** Ed25519 seed length, named so we don't sprinkle the literal `32`. */
 private const val ED25519_SEED_LEN: Int = 32
+
+/** Logcat tag for the runtime-permission flow. */
+private const val PERMISSION_LOG_TAG: String = "syauth.permission"
+
+/**
+ * The three runtime BLE permissions that Android 12+ (API 31+) enforces
+ * for a `connectedDevice` foreground service. Any one grant satisfies
+ * the platform's start-foreground gate; we request all three so the
+ * UX is one dialog regardless of which the OS counts.
+ */
+private val BLUETOOTH_RUNTIME_PERMISSIONS: Array<String> = arrayOf(
+    Manifest.permission.BLUETOOTH_CONNECT,
+    Manifest.permission.BLUETOOTH_ADVERTISE,
+    Manifest.permission.BLUETOOTH_SCAN,
+)
 
 @Composable
 private fun HomeRoute(onPairTapped: () -> Unit) {
