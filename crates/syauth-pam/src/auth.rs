@@ -299,11 +299,17 @@ fn authenticate_inner(cfg: &Config, _started: Instant) -> AuthOutcome {
             };
         }
     };
-    let timeout = cfg.auth_timeout;
+    // Split budget: `auth_timeout` caps peer detection (SPEC §4.3
+    // offline cap, 1.2 s); `response_timeout` caps the human's
+    // approve-tap + biometric window (60 s default). Using a single
+    // budget for both would either starve the user or stretch the
+    // offline-detection latency libpam's fallback rules assume.
+    let connect_budget = cfg.auth_timeout;
+    let response_budget = cfg.response_timeout;
     let response = rt.block_on(async move {
-        let mut session = peer.connect(timeout).await?;
+        let mut session = peer.connect(connect_budget).await?;
         session.send_frame(&challenge).await?;
-        let frame = session.recv_frame(timeout).await?;
+        let frame = session.recv_frame(response_budget).await?;
         Ok::<Frame, TransportError>(frame)
     });
     drop(rt);

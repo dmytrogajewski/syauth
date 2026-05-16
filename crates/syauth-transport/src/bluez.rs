@@ -479,15 +479,17 @@ impl BlueZBtPeer {
         };
 
         // Connect + discover. bluer's `connect()` is idempotent: a
-        // previously-bonded device returns Ok(()) immediately.
+        // previously-bonded device returns Ok(()) immediately. Per
+        // bluer 0.17 the subsequent `services()` call blocks on the
+        // BlueZ `ServicesResolved` property turning `true`, so a
+        // freshly-connected peer cannot race service discovery in
+        // steady-state operation.
         device.connect().await.map_err(|err| TransportError::Backend {
             reason: format!("device.connect: {err}"),
         })?;
-
         let services = device.services().await.map_err(|err| TransportError::Backend {
             reason: format!("device.services: {err}"),
         })?;
-
         let mut challenge_char: Option<Characteristic> = None;
         let mut response_char: Option<Characteristic> = None;
         for svc in services {

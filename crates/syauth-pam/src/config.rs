@@ -41,11 +41,22 @@ use std::{
 /// real path.
 pub const DEFAULT_BOND_DIR: &str = "/var/lib/syauth";
 
-/// Default authentication wall-clock budget. SPEC §4.3 mandates that an
-/// offline-peer outcome arrive at libpam within **1.2 s**, including the
-/// time spent inside the tokio runtime and the bond-store read. The number
-/// is exact, not a "ballpark" — DoD #2 measures against this constant.
+/// Default budget for the **peer-detection** half of the unlock —
+/// covers the BlueZ adapter handshake, scan, connect, and remote
+/// service discovery. SPEC §4.3 mandates that an offline-peer
+/// outcome arrive at libpam within **1.2 s**; DoD #2 measures
+/// against this constant. The recv-frame budget is independent (see
+/// [`DEFAULT_RESPONSE_TIMEOUT`]).
 pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_millis(1_200);
+
+/// Default budget for the **response** half — covers the human's
+/// reaction time after the desktop's challenge reaches the phone:
+/// approve-screen render, biometric prompt, sign + push. SPEC §4.3
+/// caps this at one user "comfortable wait" (one minute); a phone
+/// that does not respond within the budget is treated as
+/// `response-timeout` (PAM_AUTHINFO_UNAVAIL), so the configured
+/// fallback (typically pam_unix) runs.
+pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Name of the file appended to under [`Config::bond_dir`] on every
 /// `authenticate` call. Read by `syauth status` in S-012.
@@ -72,6 +83,7 @@ pub const DEFAULT_ADAPTER_NAME: &str = "hci0";
 /// adapters or when running tests against a virtual adapter.
 pub const ADAPTER_ENV_VAR: &str = "SYAUTH_ADAPTER";
 
+
 /// Runtime configuration consumed by [`crate::auth::authenticate`].
 ///
 /// Construct via [`Config::from_env`] in production code, [`Config::for_tests`]
@@ -80,8 +92,18 @@ pub const ADAPTER_ENV_VAR: &str = "SYAUTH_ADAPTER";
 pub struct Config {
     /// Directory holding `bonds.toml` and `last.log`.
     pub bond_dir: PathBuf,
-    /// Hard wall-clock budget for the entire `authenticate` call.
+    /// Peer-detection budget. Caps the time spent on BlueZ adapter
+    /// open, scan, connect, and remote service discovery. SPEC §4.3
+    /// pins this to [`DEFAULT_AUTH_TIMEOUT`] (1.2 s) so an absent
+    /// phone returns `offline` within libpam's "no-phone, fall back
+    /// to password" budget. The recv-frame budget is independent.
     pub auth_timeout: Duration,
+    /// User-approval budget. Caps the time we wait for the phone's
+    /// signed-response frame after the desktop's challenge lands —
+    /// covers Approve UI render, biometric prompt, signature, and
+    /// notify push. [`DEFAULT_RESPONSE_TIMEOUT`] (60 s) is the SPEC
+    /// §4.3 "comfortable user wait" cap.
+    pub response_timeout: Duration,
     /// Whether the mock-peer injection slot is honored. Computed from the
     /// env var AND the compile-time flags by [`Config::from_env`].
     pub mock_peer_enabled: bool,
@@ -97,6 +119,7 @@ impl Default for Config {
         Self {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
             mock_peer_enabled: false,
             adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
@@ -129,6 +152,7 @@ impl Config {
         Self {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
             mock_peer_enabled: env_says_on && allowed_by_build,
             adapter_id,
         }
@@ -144,6 +168,7 @@ impl Config {
         Self {
             bond_dir: bond_dir.to_path_buf(),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
             mock_peer_enabled: true,
             adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
