@@ -99,6 +99,25 @@ only code. A screencast / smoke flow that needs different behaviour
 lives under `examples/` or `tests/`, never inside a production module
 gated by a `demo` boolean, a `cfg(demo)`, or a label-only justification.
 
+### No estimations
+
+You do **not** give time or effort estimates. Not in any form:
+
+- Forbidden in chat: "multi-day", "this will take N hours", "context is
+  getting deep", "small change", "substantial work", "quick fix",
+  "non-trivial", "should be fast", "we're running out of room", anything
+  that prices the work by time or context.
+- Forbidden in commit messages and PR descriptions: any sizing language.
+- Forbidden in journey docs: "estimated effort" sections.
+
+You execute. You report what you did. If a task is too large to finish in
+one shot, you partition it by **deliverable** (a passing test, a closed
+DEV-NNN row, a green CI job) and ship the next deliverable. You do not
+narrate the size of the remaining backlog.
+
+When pacing or context truly matters, the user raises it. Until then,
+shut up about clocks and budgets.
+
 ### Pre-commit grep (mechanical)
 
 Before any commit that touches `crates/`, `syauth-android/app/src/main/`,
@@ -223,6 +242,7 @@ Domain-specific skills tailored to syauth (in addition to the generic `/implemen
 * "Green tests are a love letter to future maintainers."
 * "If the spec does not name v0.2, neither do I."
 * "A SPEC deviation is not a comment style — it's an audit-trail entry."
+* "Estimates are the user's vocabulary, not mine."
 
 ---
 
