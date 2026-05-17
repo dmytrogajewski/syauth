@@ -79,19 +79,23 @@ public val SYAUTH_RESPONSE_CHAR_UUID: UUID =
  */
 internal object GattPermissions {
     /**
-     * v0.1 demo: plain WRITE permission (no link encryption).
+     * GAP: DEV-004 — plain WRITE permission (no link-layer encryption).
      *
      * The frame layer (BLAKE3-keyed MAC under the shared bond_key +
-     * Ed25519-signed responses) is the authenticated boundary; link
-     * encryption is defense-in-depth that v0.2 reinstates alongside
-     * LESC pairing. Until then, requiring encryption blocks the
-     * desktop's bluer GATT client because it never bonded with the
-     * phone — operating mode lands on plaintext writes whose payload
-     * itself carries the cryptographic protection.
+     * Ed25519-signed responses) carries the cryptographic protection,
+     * but link encryption is the second-factor mandated by the SPEC
+     * §3.2 D5/D6 stack. Was `PERMISSION_WRITE_ENCRYPTED` originally;
+     * dropped because the desktop's bluer client has no LESC bond to
+     * satisfy the encryption gate. Closes naturally when DEV-001
+     * lands a real LESC bond. See `docs/known-gaps.md` row DEV-004.
      */
     val WRITE_ENCRYPTED: Int =
         BluetoothGattCharacteristic.PERMISSION_WRITE
-    /** v0.1 demo: plain READ permission. Same rationale as WRITE. */
+
+    /**
+     * GAP: DEV-004 — plain READ permission. Same rationale as
+     * [WRITE_ENCRYPTED] above. See `docs/known-gaps.md` row DEV-004.
+     */
     val READ_ENCRYPTED: Int =
         BluetoothGattCharacteristic.PERMISSION_READ
 }

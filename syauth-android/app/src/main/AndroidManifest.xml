@@ -39,13 +39,13 @@
                            required when a foreground service exists
                            because of a bonded device (S-018).
 
-  v0.1 demo addition: the phone advertises the syauth service UUID so
-  the desktop's `bluer` scan can discover the phone without operator
-  pre-configuration of the MAC. The presence-tracking defense the
-  original SPEC §3.2 D8 line called out lands in v0.2 once the LESC
-  pair flow ships (the desktop will then re-advertise rotating UUIDs;
-  the phone's advertise will be gated behind an "advertise during
-  pair window" toggle).
+  GAP: DEV-003 — the BLUETOOTH_ADVERTISE permission below exists
+  because the phone currently advertises a fixed SYAUTH_GATT_SERVICE_UUID
+  for the desktop's `bluer` central to discover. SPEC §3.2 D8 inverts
+  the direction: the DESKTOP should advertise a rotating session-bound
+  UUID and the phone should scan + connect. On closure of DEV-003,
+  BLUETOOTH_ADVERTISE is removed from this manifest and the always-on
+  GATT host service is deleted. See `docs/known-gaps.md` row DEV-003.
 
   Explicitly NOT declared (still owned by future roadmap items):
     - INTERNET             — never (BLE-only protocol per SPEC §3.4).
@@ -64,10 +64,11 @@
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="31" />
 
-    <!-- BLE advertise: v0.1 demo. The phone advertises
-         SYAUTH_GATT_SERVICE_UUID so the desktop's `bluer` scanner
-         can find the phone without manual MAC entry. See the
-         "v0.1 demo addition" block in the file header. -->
+    <!-- BLE advertise.
+         GAP: DEV-003 — the phone advertises SYAUTH_GATT_SERVICE_UUID
+         so the desktop's `bluer` scanner can find the phone. SPEC §3.2 D8
+         inverts the direction; this permission is removed on closure
+         of DEV-003. See the file-header comment. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADVERTISE"
         tools:targetApi="31" />
@@ -145,11 +146,14 @@
         </service>
 
         <!--
-          v0.1 demo: always-on GATT host service. Started from
+          GAP: DEV-003 — always-on GATT host service. Started from
           MainActivity.onCreate after the bond bootstrap returns a
-          non-null record. Independent of CDM so the desktop can
-          challenge → unlock flow works without a phone-initiated
-          LESC pairing (which is still stubbed).
+          non-null record. Exists only because the BLE advertising
+          direction is inverted vs. SPEC §3.2 D8; on closure of
+          DEV-003 this <service> entry and the
+          [SyauthGattHostService] file are removed, leaving the
+          CDM-bound [SyauthCompanionService] as the only foreground
+          service path. See `docs/known-gaps.md` row DEV-003.
         -->
         <service
             android:name=".bg.SyauthGattHostService"

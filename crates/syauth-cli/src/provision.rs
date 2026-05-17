@@ -1,12 +1,13 @@
-//! `syauth-cli` — `provision-test` subcommand: pre-seeded test bond for
-//! end-to-end demos without driving the (currently stubbed) LESC flow.
+//! `syauth-cli` — `provision-test` subcommand: pre-seeded test bond.
 //!
-//! v0.1 left both sides of the pair flow stubbed (`BluerPairBackend` and
-//! `StubPairBackend` both return "real-radio path lands in S-019"). This
-//! subcommand bridges that gap for the unlock e2e by generating all
-//! shared material on the desktop and emitting a single TOML package the
-//! phone consumes via `adb push`. Production v0.2 will replace this with
-//! a real online handshake.
+//! GAP: DEV-001 — this whole module substitutes a plaintext-TOML +
+//! adb-push handshake for the SPEC §3.2 D5 LESC numeric-comparison
+//! pairing flow + §3.3 ML 6-digit OOB confirmation. The subcommand
+//! exists only until S-011 (CLI `pair`) and S-016 (Android pairing
+//! screen) lose their `StubPairBackend` and ship real LESC; on
+//! closure of DEV-001 this entire file is removed (or gated behind a
+//! `--features=demo` flag that is OFF in every release build). See
+//! `docs/known-gaps.md` row DEV-001.
 //!
 //! What gets generated:
 //!
@@ -86,9 +87,9 @@ pub const PROVISION_SCHEMA_VERSION: u32 = 1;
 /// grep for it without hard-coding the string twice.
 pub const PROVISION_SUCCESS_BANNER: &str = "==> provision-test complete";
 
-/// Required prefix of the host-name argument. Provisional v0.1 demo
-/// constraint: we expect a short hostname-like string, not a free-form
-/// arbitrary label. Empty names are rejected.
+/// Required length bounds for the host-name argument. The CLI expects
+/// a short hostname-like string, not a free-form arbitrary label.
+/// Empty names are rejected.
 pub const HOST_NAME_MIN_LEN: usize = 1;
 pub const HOST_NAME_MAX_LEN: usize = 64;
 

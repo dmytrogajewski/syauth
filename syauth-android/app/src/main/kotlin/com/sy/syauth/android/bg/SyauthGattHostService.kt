@@ -1,22 +1,22 @@
 // syauth — always-on GATT host foreground service.
 //
-// The existing [SyauthCompanionService] is bound by Android's
-// `CompanionDeviceManager` only after a CDM association is in place,
-// which in turn requires phone-initiated LESC pairing. For v0.1 the
-// pair backend is stubbed (the desktop provisions the bond out of
-// band via `syauth provision-test`), so we add a SEPARATE always-on
-// foreground service that opens the GATT server independently of CDM
-// the moment the app launches.
+// GAP: DEV-003 — this whole module exists only because the BLE
+// advertising direction is inverted vs. SPEC §3.2 D8. The SPEC says
+// the desktop advertises a rotating session-bound UUID and the phone
+// scans + connects; instead, this service makes the phone host a
+// GATT server and advertise a fixed service UUID. Closure plan:
+// delete this file; the only foreground service path becomes
+// [SyauthCompanionService] (CDM-bound), gated by a real LESC pair
+// (closes DEV-001 first). See `docs/known-gaps.md` rows DEV-001 and
+// DEV-003.
 //
 // Routing decision (see "On incoming challenge" below): when the
 // desktop writes to the challenge characteristic, we start
 // [com.sy.syauth.android.MainActivity] directly with the deep-link
 // intent the existing [ApproveNotification] builder produces. This is
-// simpler than raising a heads-up notification + full-screen-intent
-// (the v0.2 path) and works for the v0.1 demo because the user is
-// physically next to the phone during the unlock — they will see
-// the activity come to the foreground without needing a notification
-// to draw their attention.
+// simpler than raising a heads-up notification + full-screen-intent —
+// since this service is the temporary phone-advertises path, the
+// activity directly handles the approve UI.
 package com.sy.syauth.android.bg
 
 import android.app.Notification

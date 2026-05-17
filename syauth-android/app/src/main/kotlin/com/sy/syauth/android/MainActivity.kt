@@ -185,10 +185,15 @@ class MainActivity : FragmentActivity() {
     internal val approvePayload = mutableStateOf<ApprovePayload?>(null)
 
     /**
-     * Bond record resolved by the v0.1 demo bootstrap. The approve
-     * route reads this to construct the Ed25519 signing key
-     * provider (the seed lives in plaintext in app private storage;
-     * the canonical Keystore-backed path is the v0.2 follow-up).
+     * Bond record resolved by the bootstrap path.
+     *
+     * GAP: DEV-001 — the bootstrap currently reads the bond from a
+     * plaintext provision file (`provision/BondBootstrap.kt`) instead
+     * of via SPEC §3.2 D5 LESC pairing. GAP: DEV-002 — the Ed25519
+     * seed inside this record is fed straight into
+     * `InMemorySigningKeyProvider` instead of an Android Keystore
+     * STRONGBOX handle with `setUserAuthenticationRequired(true)` per
+     * SPEC §3.2 D6. See `docs/known-gaps.md` for closure plans.
      *
      * Held in a `mutableStateOf` so Compose re-renders if a future
      * code path mutates the bond mid-session (none does today; the
@@ -352,11 +357,16 @@ private fun ApproveRoute(
                 activity = activity,
                 hostname = payload.hostname,
             ),
-            // v0.1 demo: the Ed25519 seed lives in plaintext under
-            // app private storage and is loaded eagerly by the
-            // bootstrap. The canonical Keystore-wrapped seed path
-            // (documented under "Provision-file bootstrap (v0.1 demo)"
-            // in docs/android-setup.md) replaces this in v0.2.
+            // GAP: DEV-002 — the Ed25519 seed reaches this provider
+            // as plaintext ByteArray from the bond record on disk.
+            // SPEC §3.2 D6 mandates an Android Keystore STRONGBOX-
+            // backed signing handle gated by
+            // `setUserAuthenticationRequired(true)`. Closure
+            // condition: `InMemorySigningKeyProvider` has no
+            // production callers; signing flows through a UniFFI
+            // entry point that takes a Keystore `KeyEntry` ref + the
+            // frame bytes and never sees the raw seed. See
+            // `docs/known-gaps.md` row DEV-002.
             signingKeyProvider = InMemorySigningKeyProvider(seed),
             wireSigner = UniffiWireSigner(),
             responseSender = GattResponseSender(peerId = payload.peerId),
@@ -507,6 +517,7 @@ private class StubPairBackend : PairBackend {
 
 // The previous `InMemoryBondPersister` no-op was replaced by the
 // disk-backed [com.sy.syauth.android.provision.DiskBondPersister].
-// See `provision/DiskBondPersister.kt` for the v0.1 behaviour
-// (writes a stub provision record into the BondStore so a future
-// LESC backend has somewhere to land its full record).
+// GAP: DEV-001 — that persister currently writes a stub provision
+// record into the BondStore. When LESC pairing lands (S-016 real
+// backend), the persister writes the bond_key derived from the
+// LE Secure Connections handshake instead. See `docs/known-gaps.md`.

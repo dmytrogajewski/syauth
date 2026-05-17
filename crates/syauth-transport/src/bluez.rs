@@ -603,10 +603,11 @@ impl Session for BlueZSession {
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), TransportError> {
         let mut bytes = Vec::with_capacity(syauth_core::MAX_FRAME_LEN);
         frame.encode(&mut bytes).map_err(TransportError::BadFrame)?;
-        // For v0.1 demo we rely on negotiated MTU >= frame.len(). Phones
-        // running Android 5+ negotiate up to 517 bytes, well above the
-        // ~57-byte challenge frame; if a future change pushes a larger
-        // frame, switch to the existing fragment/reassemble pair.
+        // Single-write path: relies on the negotiated MTU being at least
+        // `frame.len()`. Android 5+ negotiates up to 517 bytes, well above
+        // the ~57-byte challenge frame. The existing fragment/reassemble
+        // pair in `mac::reassemble` handles the larger-frame case if a
+        // future SPEC bump pushes the upper bound past one ATT MTU.
         self.challenge_char.write(&bytes).await.map_err(|err| TransportError::Backend {
             reason: format!("challenge.write: {err}"),
         })?;

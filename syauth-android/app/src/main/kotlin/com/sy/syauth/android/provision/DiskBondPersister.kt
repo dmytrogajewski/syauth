@@ -1,20 +1,16 @@
 // syauth — pair-flow [BondPersister] adapter that writes through to
 // the on-disk bond store.
 //
-// The S-016 pair flow's `BondRecord` carries only `peerId`,
-// `peerName`, and `bondKey` (the LESC handshake never observes the
-// peer's Ed25519 signing key — that surface lands once the
-// desktop-side LESC server exposes its identity key on the wire).
-// The v0.1 demo bootstrap therefore prefers the desktop's provision
-// file over this code path; the pair flow itself is stubbed and
-// never advances past `Scanning`.
-//
-// Still, wiring the persister to a real on-disk write means a future
-// LESC backend that DOES produce a full bond record (peer pubkey
-// included) can supply it without re-plumbing the seam. For the
-// current pair path the seed + pubkey fields are written as zeroed
-// placeholders; the on-disk record is unusable for `signWire` until
-// the LESC path lands.
+// GAP: DEV-001 — the S-016 pair flow currently uses `StubPairBackend`
+// in `MainActivity.kt`, so this persister is reached only via the
+// provision-file bootstrap path. The bond_key is written but the
+// `phoneSigningKeySeed` / `phonePubkey` fields are zeroed
+// placeholders here — they only carry real bytes when the bootstrap
+// path consumes a `ProvisionPackage` and calls `BondStore.save`
+// directly. Closure: when LESC pairing lands and the BondRecord
+// carries the full bond material (bond_key + signing-key seed +
+// pubkey), this persister writes it directly. See
+// `docs/known-gaps.md` row DEV-001.
 package com.sy.syauth.android.provision
 
 import android.util.Log
@@ -26,9 +22,10 @@ public const val DISK_PERSISTER_LOG_TAG: String = "syauth.persister"
 
 /**
  * Filler string written into the `created_at` field for pair-flow
- * records. The v0.1 demo bootstrap path overwrites this when it
- * comes via the desktop's provision file (which carries the real
- * RFC-3339 timestamp).
+ * records. The provision-file bootstrap overwrites this with a real
+ * RFC-3339 timestamp on its own write path; the placeholder is only
+ * observable if a stub backend (today's `StubPairBackend`) calls
+ * `persist` directly.
  */
 internal const val DISK_PERSISTER_PLACEHOLDER_CREATED_AT: String =
     "1970-01-01T00:00:00Z"

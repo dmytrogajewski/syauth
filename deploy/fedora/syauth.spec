@@ -82,9 +82,10 @@ cargo build --release \
     --package syauth-pam \
     --package syauth-cli
 
-# Manpage. The source crate exposes its `--help` output; the simplest
-# v0.1 manpage is a hand-authored stub that points at `--help` and
-# the README. A richer manpage is a v0.2 follow-up tracked in
+# Manpage. The source crate exposes its `--help` output; the manpage
+# below is a hand-authored stub that points at `--help` and the
+# README — the help text itself is the source of truth, so a richer
+# manpage would duplicate effort. Closure plan documented in
 # docs/release-process.md.
 mkdir -p target/man
 cat > target/man/syauth.8 <<'MAN'

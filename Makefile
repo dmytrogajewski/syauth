@@ -94,8 +94,8 @@ scope-discipline:
 	@echo "Running scope-discipline grep..."
 	@if git grep -nE \
 	    '(v0\.[0-9]+ ?(demo|will|follow.?up|reinstates|candidate))|(for the v0\.)|(production (version|will))|(demo only)|(temporary until)|(placeholder until)' \
-	    -- 'crates/*.rs' 'syauth-android/app/src/main/**/*.kt' 'syauth-android/app/src/main/**/*.xml' \
-	    'deploy/**/*' ':!:*tests/*' ':!:*test/*'; then \
+	    -- 'crates/' 'syauth-android/app/src/main/' 'deploy/' \
+	    ':!:*tests/*' ':!:*test/*' ':!:*build/*' ':!:*target/*'; then \
 	  echo ""; \
 	  echo "SCOPE-DISCIPLINE: forbidden phrases above are not anchored in specs/."; \
 	  echo "  Either remove them, or run the SPEC-DEVIATION procedure in AGENTS.md."; \

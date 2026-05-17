@@ -5,9 +5,10 @@
 // the bytes back to the desktop over the SYAUTH_RESPONSE_CHAR_UUID
 // characteristic on the GATT server the
 // [SyauthCompanionService] opened. The sender is keyed by `peerId`
-// because at any given moment several bonded peers could each have
-// an in-flight Approve flow (v0.2 will exercise this; v0.1 has
-// exactly one).
+// so the registry can hold multiple in-flight Approve flows when
+// SPEC §3.3 ML "OUT — explicitly not in v0.1.0" relaxes its
+// single-peer constraint in a future scope bump; today only one
+// slot is ever populated.
 //
 // If the OS unbinds the service between challenge-receive and the
 // user's tap-Approve (battery optimisation disabled mid-flight, OEM
