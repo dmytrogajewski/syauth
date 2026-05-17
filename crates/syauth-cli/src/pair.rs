@@ -292,9 +292,99 @@ pub enum PairError {
         reason: String,
     },
 
+    /// Peer (or the local stack via a misconfigured agent) attempted a
+    /// pairing variant that has no MITM protection — Just Works. SPEC §3.2
+    /// D5 demands LE Secure Connections numeric comparison; anything that
+    /// would silently downgrade is refused. `actual` names the variant
+    /// the stack offered.
+    #[error("pair flow refused: {actual} variant has no MITM protection (LESC numeric comparison required by SPEC §3.2 D5)")]
+    DowngradeBlocked {
+        /// The variant the peer / stack offered.
+        actual: PairingVariant,
+    },
+
+    /// Peer requested a pairing variant we cannot drive: legacy PIN,
+    /// passkey-entry, OOB-only. None of these are equivalent to LESC
+    /// numeric comparison and we do not implement them.
+    #[error("pair flow refused: unsupported pairing variant '{actual}'")]
+    UnsupportedPairingVariant {
+        /// The variant the peer / stack offered.
+        actual: PairingVariant,
+    },
+
     /// Stdin / stdout error during the operator prompt.
     #[error("pair I/O error: {0}")]
     Io(#[from] io::Error),
+}
+
+/// Pairing variants the BlueZ / Android stacks can present at agent /
+/// `ACTION_PAIRING_REQUEST` time. Modeled here as a typed enum so the
+/// decision logic in [`decide_pairing`] is testable without a radio.
+/// The Display names are stable, lowercase-kebab strings — operator-
+/// facing error messages embed them and an operator may grep for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingVariant {
+    /// LESC numeric comparison. BlueZ:
+    /// `Agent1::RequestConfirmation(device, passkey)`. Android:
+    /// `BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION` (1).
+    /// This is the **only** variant the syauth pair flow accepts.
+    PasskeyConfirmation,
+
+    /// "Just Works": both ends auto-accept without operator confirmation.
+    /// BlueZ: `Agent1::RequestAuthorization`. Android:
+    /// `BluetoothDevice.PAIRING_VARIANT_CONSENT` (3). Has no MITM
+    /// protection; SPEC §3.2 D5 forbids silently using it.
+    JustWorks,
+
+    /// Legacy BR/EDR PIN entry (pre-BT 2.1 SSP). BlueZ never offers it
+    /// for LE devices but a misbehaving stack might; refuse.
+    LegacyPin,
+
+    /// Passkey entry: one side displays a code, the other types it.
+    /// BlueZ: `Agent1::RequestPasskey` / `DisplayPasskey`. Distinct from
+    /// LESC numeric comparison and not what SPEC §3.2 D5 prescribes.
+    PasskeyEntry,
+
+    /// OOB-only pairing (data exchanged via NFC, QR, etc.). Out of
+    /// scope for the SPEC §3.3 ML "IN — v0.1.0" surface.
+    OobOnly,
+}
+
+impl std::fmt::Display for PairingVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PairingVariant::PasskeyConfirmation => "passkey-confirmation",
+            PairingVariant::JustWorks => "just-works",
+            PairingVariant::LegacyPin => "legacy-pin",
+            PairingVariant::PasskeyEntry => "passkey-entry",
+            PairingVariant::OobOnly => "oob-only",
+        })
+    }
+}
+
+/// Decide whether `variant` is acceptable for a syauth pair flow.
+///
+/// Returns `Ok(())` only for [`PairingVariant::PasskeyConfirmation`] —
+/// the LESC numeric-comparison variant SPEC §3.2 D5 mandates. Every
+/// other variant is refused with a typed error:
+///
+/// * [`PairingVariant::JustWorks`] → [`PairError::DowngradeBlocked`]
+///   (no MITM protection; silent downgrade attempt).
+/// * Everything else → [`PairError::UnsupportedPairingVariant`].
+///
+/// Called by the BlueZ agent's `request_confirmation` /
+/// `request_authorization` callbacks on the Linux side and by the
+/// Android `ACTION_PAIRING_REQUEST` receiver. Both paths consult a
+/// single function so the decision is observable, testable, and
+/// monotonic — no fork between platforms.
+pub fn decide_pairing(variant: PairingVariant) -> Result<(), PairError> {
+    match variant {
+        PairingVariant::PasskeyConfirmation => Ok(()),
+        PairingVariant::JustWorks => Err(PairError::DowngradeBlocked { actual: variant }),
+        PairingVariant::LegacyPin | PairingVariant::PasskeyEntry | PairingVariant::OobOnly => {
+            Err(PairError::UnsupportedPairingVariant { actual: variant })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +632,81 @@ pub async fn run_pair(opts: &PairOpts, backend: &dyn PairBackend) -> Result<Pair
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------
+    // DEV-001 — Pairing variant enforcement (JOURNEY-DEV-001 TC-03).
+    //
+    // SPEC §3.2 D5 mandates "LE Secure Connections numeric comparison".
+    // The BlueZ agent + Android pairing receiver each receive a typed
+    // variant on every pair request; only LESC numeric comparison is
+    // acceptable. Everything else (Just Works, legacy PIN, OOB-only,
+    // passkey-entry-typed) is a downgrade attempt and must be refused.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decide_pairing_accepts_passkey_confirmation() {
+        // LESC numeric comparison: BlueZ variant
+        // `RequestConfirmation(device, passkey)`; Android
+        // `PAIRING_VARIANT_PASSKEY_CONFIRMATION` (value 1).
+        let got = decide_pairing(PairingVariant::PasskeyConfirmation);
+        assert!(got.is_ok(), "expected Ok for PasskeyConfirmation, got {got:?}");
+    }
+
+    #[test]
+    fn decide_pairing_rejects_just_works_as_downgrade_blocked() {
+        // Just Works: BlueZ `RequestAuthorization`; Android
+        // `PAIRING_VARIANT_CONSENT` (value 3). No MITM protection;
+        // accepting it silently weakens the bond.
+        let got = decide_pairing(PairingVariant::JustWorks);
+        assert!(
+            matches!(got, Err(PairError::DowngradeBlocked { .. })),
+            "expected DowngradeBlocked for JustWorks, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn decide_pairing_rejects_legacy_pin_as_unsupported_variant() {
+        let got = decide_pairing(PairingVariant::LegacyPin);
+        assert!(
+            matches!(got, Err(PairError::UnsupportedPairingVariant { .. })),
+            "expected UnsupportedPairingVariant for LegacyPin, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn decide_pairing_rejects_passkey_entry_as_unsupported_variant() {
+        let got = decide_pairing(PairingVariant::PasskeyEntry);
+        assert!(
+            matches!(got, Err(PairError::UnsupportedPairingVariant { .. })),
+            "expected UnsupportedPairingVariant for PasskeyEntry, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn decide_pairing_rejects_oob_only_as_unsupported_variant() {
+        let got = decide_pairing(PairingVariant::OobOnly);
+        assert!(
+            matches!(got, Err(PairError::UnsupportedPairingVariant { .. })),
+            "expected UnsupportedPairingVariant for OobOnly, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn pairing_variant_display_is_stable_and_secret_free() {
+        // Display names appear in operator-facing error reasons; they
+        // must be stable (an operator can grep for them) and must not
+        // include any secret-derived bytes. The `Debug` impl is fine
+        // for logs; the `to_string` is what `PairError` formats.
+        assert_eq!(PairingVariant::PasskeyConfirmation.to_string(), "passkey-confirmation");
+        assert_eq!(PairingVariant::JustWorks.to_string(), "just-works");
+        assert_eq!(PairingVariant::LegacyPin.to_string(), "legacy-pin");
+        assert_eq!(PairingVariant::PasskeyEntry.to_string(), "passkey-entry");
+        assert_eq!(PairingVariant::OobOnly.to_string(), "oob-only");
+    }
+
+    // -----------------------------------------------------------------
+    // Legacy tests below.
+    // -----------------------------------------------------------------
 
     #[test]
     fn parse_yes_no_recognizes_y_and_yes() {

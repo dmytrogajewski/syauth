@@ -83,7 +83,6 @@ pub const DEFAULT_ADAPTER_NAME: &str = "hci0";
 /// adapters or when running tests against a virtual adapter.
 pub const ADAPTER_ENV_VAR: &str = "SYAUTH_ADAPTER";
 
-
 /// Runtime configuration consumed by [`crate::auth::authenticate`].
 ///
 /// Construct via [`Config::from_env`] in production code, [`Config::for_tests`]

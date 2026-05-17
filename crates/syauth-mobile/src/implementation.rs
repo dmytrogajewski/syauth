@@ -23,7 +23,8 @@ use hkdf::Hkdf;
 use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
 use syauth_core::{
-    BOND_KEY_BYTES, Frame, MAC_TAG_LEN, NONCE_LEN, SYAUTH_WIRE_VERSION_V1, Signature, SigningKey, VerifyingKey, compute_tag, sign_frame, verify_frame, verify_tag,
+    BOND_KEY_BYTES, Frame, MAC_TAG_LEN, NONCE_LEN, SYAUTH_WIRE_VERSION_V1, Signature, SigningKey, VerifyingKey, compute_tag, sign_frame,
+    verify_frame, verify_tag,
 };
 use thiserror::Error;
 
