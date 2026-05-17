@@ -11,6 +11,15 @@ Follow the persona and contracts defined in AGENTS.md.
 Run `make lint` before considering any step complete.
 Never test PAM changes against the user's real login stack on the host machine. Always use a disposable service name (e.g. `syauth-test`) or a container/VM.
 Unsafe FFI code requires a documented `// SAFETY:` justification — see /ffi for the audit checklist.
+
+**Scope Discipline (AGENTS.md, non-negotiable).** SPEC §3.2 D7 (PAM
+stack behaviour: `required` for `sudo`/`gdm-password`, fall through
+to `pam_unix` on `PAM_AUTHINFO_UNAVAIL`) and §3.3 ML "IN" return-code
+contract are load-bearing. Bond-key loading paths must respect §3.2
+D6 (Linux: kernel keyring + libsecret fallback; never plaintext
+files unless the deviation is approved + tagged). No invented
+scope labels (`v0.1 demo`, `v0.2 will…`) in pam-module comments or
+test fixtures.
 </constraints>
 
 <role>

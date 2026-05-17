@@ -72,7 +72,7 @@ bench:
 #   3. cargo audit  (non-fatal in lint; sibling `audit` target is fatal)
 #   4. cargo deny check  (fatal)
 .PHONY: lint
-lint:
+lint: scope-discipline
 	@echo "Running clippy..."
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@echo "Checking formatting..."
@@ -82,6 +82,26 @@ lint:
 	@echo "Running cargo deny check..."
 	$(CARGO) deny check
 	@echo "Linting complete"
+
+# Scope Discipline (AGENTS.md, non-negotiable): no invented scope
+# vocabulary in production source. Banned phrases must not appear
+# under crates/ or syauth-android/app/src/main/. The only way to ship
+# a deviation from SPEC §3.2 D1-D8 / §3.3 ML "IN — v0.1.0" is the
+# `// SPEC-DEVIATION:` marker + a row in docs/known-gaps.md; if a
+# reviewer needs the list of incomplete work, it's `git grep "// GAP:"`.
+.PHONY: scope-discipline
+scope-discipline:
+	@echo "Running scope-discipline grep..."
+	@if git grep -nE \
+	    '(v0\.[0-9]+ ?(demo|will|follow.?up|reinstates|candidate))|(for the v0\.)|(production (version|will))|(demo only)|(temporary until)|(placeholder until)' \
+	    -- 'crates/*.rs' 'syauth-android/app/src/main/**/*.kt' 'syauth-android/app/src/main/**/*.xml' \
+	    'deploy/**/*' ':!:*tests/*' ':!:*test/*'; then \
+	  echo ""; \
+	  echo "SCOPE-DISCIPLINE: forbidden phrases above are not anchored in specs/."; \
+	  echo "  Either remove them, or run the SPEC-DEVIATION procedure in AGENTS.md."; \
+	  exit 1; \
+	fi
+	@echo "Scope-discipline grep clean."
 
 # Format code.
 .PHONY: fmt

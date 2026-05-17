@@ -10,6 +10,15 @@ Do not run git commands. All version control is handled by the user.
 Follow the persona and contracts defined in AGENTS.md.
 A threat-model output is a written artifact, not a verbal review. Always produce `specs/threat/THREAT-{datetime}.md`.
 This skill is auth-domain specific. For generic dependency CVE review or a code-level security pass, use the built-in `/security-review` instead.
+
+**Scope Discipline (AGENTS.md, non-negotiable).** Every threat-model
+finding must reference `specs/syauth/SPEC.md` §3.2 D1–D8 or §3.3 by
+section ID. A finding that contradicts a D1–D8 decision is a finding
+*against the spec* and must surface as such; do not silently accept
+the deviation. When auditing existing code, every
+`// SPEC-DEVIATION:` marker the threat model finds gets enumerated
+under a dedicated "Open deviations" section of the threat doc, with
+the closure condition copied from `docs/known-gaps.md`.
 </constraints>
 
 <role>

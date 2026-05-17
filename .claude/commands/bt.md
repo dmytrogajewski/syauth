@@ -11,6 +11,16 @@ Follow the persona and contracts defined in AGENTS.md.
 Run `make lint` before considering any step complete.
 Never test against the user's daily-driver phone or paired devices. Use an emulator, a dedicated test device, or a mock BlueZ peer.
 Never call `unsafe` raw HCI ioctls when a `zbus` / BlueZ wrapper exists — see /ffi.
+
+**Scope Discipline (AGENTS.md, non-negotiable).** SPEC §3.2 D5 (LESC
+numeric comparison + OOB), D6 (Keystore + STRONGBOX + biometric-gated
+sign), and D8 (desktop advertises, phone scans) are load-bearing for
+this skill. Weakening any of them — dropping LESC, using plaintext
+key storage, inverting advertising direction, dropping link-layer
+encryption — requires explicit user approval first, a
+`// SPEC-DEVIATION:` marker on every affected source line, and a row
+in `docs/known-gaps.md`. No "v0.1 demo" / "v0.2 will reinstate"
+escape hatches.
 </constraints>
 
 <role>

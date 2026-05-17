@@ -10,6 +10,14 @@ Do not run git commands. All version control is handled by the user.
 Follow the persona and contracts defined in AGENTS.md.
 Run `make lint` before considering any step complete.
 Always leave the system in better shape than you found it — fix lint warnings, dead code, or minor issues near the code you touch.
+
+**Scope Discipline applies.** AGENTS.md "Scope Discipline (Non-Negotiable)"
+is load-bearing. No invented scoping vocabulary (`v0.1 demo`,
+`v0.2 will…`, future-tense promises not pinned in
+`specs/syauth/SPEC.md` / `specs/syauth/ROADMAP.md`). Any weakening of
+SPEC §3.2 D1–D8 or §3.3 ML "IN — v0.1.0" requires explicit user
+approval + `// SPEC-DEVIATION:` marker + `docs/known-gaps.md` row.
+Stubs tagged `// GAP: …`, never `// v0.1 demo`.
 </constraints>
 
 Respect AGENTS.md
