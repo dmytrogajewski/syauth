@@ -30,8 +30,8 @@ use std::{
 };
 
 use syauth_core::{
-    Bond, BondStatus, Frame, NONCE_LEN, SIGNATURE_LEN, SYAUTH_WIRE_VERSION_V1, SigningKey, TAG_LEN, bond::PUBKEY_LEN, peer_id_from_pubkey,
-    sign_frame,
+    Bond, BondStatus, Frame, NONCE_LEN, SIGNATURE_LEN, SYAUTH_WIRE_VERSION_V1, SigningKey, bond::PUBKEY_LEN, compute_tag,
+    peer_id_from_pubkey, sign_frame,
 };
 use syauth_presenced::{
     AuditLog, ChallengeOutcome, DEFAULT_AUTH_TIMEOUT, OUTCOME_REASON_BAD_SIGNATURE, OUTCOME_REASON_OK, OUTCOME_REASON_RESPONSE_TIMEOUT,
@@ -112,7 +112,13 @@ fn sign_notified_challenge(notify_bytes: &[u8], signing_key: &SigningKey) -> Vec
     let frame = Frame::decode(notify_bytes).expect("decode notify");
     assert_eq!(frame.version, SYAUTH_WIRE_VERSION_V1);
     assert_eq!(frame.nonce.len(), NONCE_LEN);
-    assert_eq!(frame.tag, [0u8; TAG_LEN]);
+    // The orchestrator now MACs the body bytes with the bond_key
+    // before notifying so the phone's `verifyChallengeFrame` accepts
+    // the wire frame. The tag is computed over the same body the
+    // signature verifier uses, and it must match for the wire format
+    // to round-trip cleanly.
+    let body = frame.body_bytes().expect("body_bytes");
+    assert_eq!(frame.tag, compute_tag(&BOND_KEY, &body));
     assert!(frame.payload.is_empty(), "challenge frame must have empty payload");
     let signature = sign_frame(signing_key, &frame).expect("sign frame");
     signature.to_bytes().to_vec()

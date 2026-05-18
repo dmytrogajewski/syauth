@@ -40,16 +40,18 @@ use bluer::{
     gatt::{
         CharacteristicReader, CharacteristicWriter,
         local::{
-            Application, ApplicationHandle, Characteristic, CharacteristicControlEvent, CharacteristicNotify,
-            CharacteristicNotifyMethod, CharacteristicWrite, CharacteristicWriteMethod, Service, characteristic_control,
+            Application, ApplicationHandle, Characteristic, CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyMethod,
+            CharacteristicWrite, CharacteristicWriteMethod, Service, characteristic_control,
         },
     },
 };
 use futures::StreamExt;
-use tokio::io::AsyncReadExt;
-use tokio::task::JoinHandle;
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    io::AsyncReadExt,
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 
 use crate::{
     bluez::{BOND_KEY_BYTES, SYAUTH_CHALLENGE_CHAR_UUID, SYAUTH_RESPONSE_CHAR_UUID, map_adapter_open_error, session_uuid_for},
@@ -324,10 +326,8 @@ impl PersistentPeripheral {
     /// phone whose CCCD subscription is bound to the previous
     /// Application registration is forced to re-handshake.
     async fn kick_connected_peers(&self) -> Result<(), PeripheralError> {
-        let addrs = self.adapter.device_addresses().await.map_err(|err| {
-            PeripheralError::Backend {
-                reason: format!("device_addresses: {err}"),
-            }
+        let addrs = self.adapter.device_addresses().await.map_err(|err| PeripheralError::Backend {
+            reason: format!("device_addresses: {err}"),
         })?;
         for addr in addrs {
             let device = match self.adapter.device(addr) {
@@ -398,7 +398,15 @@ impl PersistentPeripheral {
     async fn build_and_register_peer(
         &self,
         bond_key: &BondKey,
-    ) -> Result<(Arc<Mutex<Option<CharacteristicWriter>>>, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, JoinHandle<()>), PeripheralError> {
+    ) -> Result<
+        (
+            Arc<Mutex<Option<CharacteristicWriter>>>,
+            mpsc::Sender<Vec<u8>>,
+            mpsc::Receiver<Vec<u8>>,
+            JoinHandle<()>,
+        ),
+        PeripheralError,
+    > {
         let (mut chal_control, chal_handle) = characteristic_control();
         let (mut resp_control, resp_handle) = characteristic_control();
         let service_uuid = peer_service_uuid(bond_key);
@@ -544,7 +552,7 @@ impl PersistentPeripheral {
 #[async_trait]
 impl Peripheral for PersistentPeripheral {
     async fn add_peer(&self, peer_id: &str, bond_key: &BondKey) -> Result<(), PeripheralError> {
-        let mut peers = self.peers.lock().await;
+        let peers = self.peers.lock().await;
         if peers.contains_key(peer_id) {
             return Err(PeripheralError::PeerAlreadyAdded {
                 peer_id: peer_id.to_owned(),

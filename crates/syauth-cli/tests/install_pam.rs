@@ -27,8 +27,11 @@ session    include      system-auth
 session    optional     pam_xauth.so
 ";
 
-/// Canonical inserted line per the S-013 DoD.
-const CANONICAL_LINE: &str = "auth    required    pam_syauth.so timeout=1200";
+/// Canonical inserted line under the current CLI defaults
+/// (`--control sufficient`, `--module-args timeout=8000`). Tests
+/// that want the legacy `required` / `timeout=1200` shape pass the
+/// flags explicitly.
+const CANONICAL_LINE: &str = "auth    sufficient    pam_syauth.so timeout=8000";
 
 /// Service name used by every test.
 const SERVICE_NAME: &str = "sudo";
@@ -256,7 +259,7 @@ fn tc08_install_honors_module_args() {
 
     let after = fs::read_to_string(&service).expect("read after");
     assert!(
-        after.contains("auth    required    pam_syauth.so timeout=60 debug"),
+        after.contains("auth    sufficient    pam_syauth.so timeout=60 debug"),
         "expected custom module-args to be honored; got:\n{after}"
     );
 }
@@ -283,7 +286,7 @@ fn tc09_install_honors_so_path() {
 
     let after = fs::read_to_string(&service).expect("read after");
     assert!(
-        after.contains("auth    required    pam_syauth_test.so timeout=1200"),
+        after.contains("auth    sufficient    pam_syauth_test.so timeout=8000"),
         "expected custom so-path to be honored; got:\n{after}"
     );
 }

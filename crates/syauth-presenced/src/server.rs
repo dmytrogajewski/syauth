@@ -381,12 +381,15 @@ async fn dispatch(
 /// Per-connection internal error surface. Not re-exported — every
 /// branch logs at the appropriate level and the spawning task
 /// swallows the result so accept-loop liveness is preserved.
+///
+/// The `UidMismatch` variant was retired when the SO_PEERCRED check
+/// became advisory (the filesystem ACL on the socket is the primary
+/// defense; sudo's PAM namespace surfaces the peer as `nobody` so a
+/// hard mismatch reject locked out the production path).
 #[derive(Debug, Error)]
 enum HandlerError {
     #[error("getsockopt(SO_PEERCRED) failed: {0}")]
     PeerCredentials(nix::errno::Errno),
-    #[error("peer uid {peer_uid} != expected uid {expected_uid}")]
-    UidMismatch { peer_uid: u32, expected_uid: u32 },
     #[error("frame I/O failed: {0}")]
     Frame(#[from] FrameError),
 }

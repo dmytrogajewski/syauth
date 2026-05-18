@@ -173,53 +173,44 @@ async fn challenge_request_returns_stub() {
 }
 
 #[tokio::test]
-async fn rejects_non_matching_peer_credential() {
-    // `current_uid() + 1` is guaranteed to be a different UID from
-    // the test process so the ACL fires deterministically. The smoke
-    // test does not need root and does not need to fork; the daemon
-    // is configured with `expected_uid = Some(other_uid)` and rejects
-    // the test process's well-formed connection on `SO_PEERCRED`.
+async fn accepts_non_matching_peer_credential_with_warning() {
+    // SO_PEERCRED is now advisory: the filesystem ACL on the socket
+    // (0600 inside the per-user XDG_RUNTIME_DIR) is the primary
+    // defense, and sudo's PAM namespace surfaces the peer as
+    // `nobody` (uid=65534) — a hard mismatch reject locked out the
+    // production unlock path. The daemon now logs a warn on
+    // mismatch but still processes the request.
+    //
+    // This test asserts the relaxed contract:
+    //   - well-formed connection from a non-matching UID succeeds
+    //   - the daemon emits a `Response::Challenge` (the stub
+    //     "not-implemented" reason path, identical to the matching-
+    //     UID smoke above)
+    //   - the accept loop remains live for a second connection
     let other_uid = current_uid().wrapping_add(1);
     let mut daemon = Daemon::spawn(Some(other_uid)).await;
 
     let mut stream = UnixStream::connect(&daemon.socket).await.expect("connect succeeds");
-    // The daemon's per-connection handler runs the ACL FIRST and
-    // drops the connection without reading. Writing a frame on our
-    // side may or may not flush (the socket buffer may hold it), so
-    // the assertion below is on the READ side: the daemon never
-    // sends a response, and the read sees EOF.
-    let _ = send_challenge(&mut stream).await;
-    let read_result = timeout(ROUND_TRIP_BUDGET, read_frame::<_, Response>(&mut stream)).await;
-    match read_result {
-        Ok(Err(syauth_presenced::FrameError::Io(err))) => {
-            // The daemon closed the connection without writing a
-            // response. Depending on whether the test's send_frame
-            // was still mid-flush when the daemon's `close` raced
-            // it, the kernel reports either UnexpectedEof (clean
-            // FIN) or ConnectionReset (RST after a TCP-RST-style
-            // half-close from the peer side). Both are equally
-            // valid evidence the ACL fired and dropped the
-            // connection.
-            let kind = err.kind();
-            assert!(
-                matches!(kind, std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset),
-                "expected EOF / ConnectionReset on ACL drop, got {err:?}"
-            );
+    send_challenge(&mut stream).await.expect("send_challenge");
+    let response = timeout(ROUND_TRIP_BUDGET, read_frame::<_, Response>(&mut stream))
+        .await
+        .expect("response within budget")
+        .expect("frame decodes");
+    match response {
+        Response::Challenge { ok, .. } => {
+            assert!(!ok, "stub response from mismatched-uid path must still have ok=false");
         }
-        Ok(other) => panic!("expected EOF on ACL drop, got {other:?}"),
-        Err(_) => panic!("expected EOF within budget, got timeout"),
+        other => panic!("expected Response::Challenge, got {other:?}"),
     }
 
-    // Daemon is still healthy and refuses a second connection from
-    // the same client the same way — the rejection path didn't
-    // crash the accept loop.
+    // Accept loop survived; a second connection is still served.
     let mut second = UnixStream::connect(&daemon.socket).await.expect("second connect succeeds");
-    let _ = send_challenge(&mut second).await;
-    let second_read = timeout(ROUND_TRIP_BUDGET, read_frame::<_, Response>(&mut second)).await;
-    assert!(
-        matches!(second_read, Ok(Err(_))),
-        "second connection also EOF'd, got {second_read:?}"
-    );
+    send_challenge(&mut second).await.expect("second send_challenge");
+    let second_response = timeout(ROUND_TRIP_BUDGET, read_frame::<_, Response>(&mut second))
+        .await
+        .expect("second response within budget")
+        .expect("second frame decodes");
+    assert!(matches!(second_response, Response::Challenge { .. }));
 
     daemon.shutdown().await;
 }
