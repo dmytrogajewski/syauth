@@ -49,7 +49,6 @@ class ApproveViewModelTest {
     private val testDispatcher = StandardTestDispatcher()
 
     private val cannedWireSignature: ByteArray = ByteArray(WIRE_SIGNATURE_LEN) { it.toByte() }
-    private val cannedSeed: ByteArray = ByteArray(SEED_LEN) { (it + 1).toByte() }
     private val cannedBondKey: ByteArray = ByteArray(SEED_LEN) { (it + 0x40).toByte() }
     private val challengeFrame: ByteArray = ByteArray(CHALLENGE_LEN) { (0xA0 + it).toByte() }
     private val hostname: String = "dell-precision"
@@ -72,7 +71,7 @@ class ApproveViewModelTest {
             biometricPresenter = FakeBiometricPresenter { sig ->
                 BiometricResult.Success(sig)
             },
-            wireSigner = FakeWireSigner { _, _ -> WireSignResult.Ok(cannedWireSignature) },
+            wireSigner = FakeWireSigner { _ -> WireSignResult.Ok(cannedWireSignature) },
         )
         viewModel.start()
         runCurrent()
@@ -190,36 +189,11 @@ class ApproveViewModelTest {
     }
 
     @Test
-    fun missing_seed_emits_sign_error() = runTest(testDispatcher) {
-        val sender = FakeResponseSender()
-        val viewModel = buildViewModel(
-            sender = sender,
-            signingKeyProvider = object : SigningKeyProvider {
-                override suspend fun loadSeed(): SigningKeyResult =
-                    SigningKeyResult.Missing("seed-not-bound")
-            },
-        )
-        viewModel.start()
-        runCurrent()
-
-        viewModel.onApproveClicked()
-        advanceUntilIdle()
-
-        val terminal = viewModel.uiState.value
-        assertTrue(terminal is ApproveUiState.Denied)
-        val denied = terminal as ApproveUiState.Denied
-        assertTrue(denied.reason is DenialReason.SignError)
-        assertEquals("seed-not-bound", (denied.reason as DenialReason.SignError).reason)
-        assertEquals(0, sender.approveCalls.size)
-        assertEquals(1, sender.denyCalls)
-    }
-
-    @Test
     fun wire_signer_failure_emits_sign_error() = runTest(testDispatcher) {
         val sender = FakeResponseSender()
         val viewModel = buildViewModel(
             sender = sender,
-            wireSigner = FakeWireSigner { _, _ -> WireSignResult.Failure("bad-frame") },
+            wireSigner = FakeWireSigner { _ -> WireSignResult.Failure("bad-frame") },
         )
         viewModel.start()
         runCurrent()
@@ -240,8 +214,7 @@ class ApproveViewModelTest {
         biometricPresenter: BiometricPresenter = FakeBiometricPresenter { sig ->
             BiometricResult.Success(sig)
         },
-        wireSigner: WireSigner = FakeWireSigner { _, _ -> WireSignResult.Ok(cannedWireSignature) },
-        signingKeyProvider: SigningKeyProvider = InMemorySigningKeyProvider(cannedSeed),
+        wireSigner: WireSigner = FakeWireSigner { _ -> WireSignResult.Ok(cannedWireSignature) },
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         tickMillis: Long = DEFAULT_TICK_MILLIS,
     ): ApproveViewModel = ApproveViewModel(
@@ -250,7 +223,6 @@ class ApproveViewModelTest {
         bondKey = cannedBondKey,
         keystoreSigner = FakeKeystoreSigner(),
         biometricPresenter = biometricPresenter,
-        signingKeyProvider = signingKeyProvider,
         wireSigner = wireSigner,
         responseSender = sender,
         clock = FakeClock,
@@ -301,10 +273,10 @@ private class FakeBiometricPresenter(
 }
 
 private class FakeWireSigner(
-    private val behaviour: (ByteArray, ByteArray) -> WireSignResult,
+    private val behaviour: (ByteArray) -> WireSignResult,
 ) : WireSigner {
-    override suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult =
-        behaviour(seed, frameBytes)
+    override suspend fun signWire(bondKey: ByteArray, frameBytes: ByteArray): WireSignResult =
+        behaviour(frameBytes)
 }
 
 /**

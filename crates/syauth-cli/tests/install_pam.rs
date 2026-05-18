@@ -61,6 +61,7 @@ fn tc01_install_inserts_canonical_line_at_top_of_auth_block() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
 
@@ -93,6 +94,7 @@ fn tc02_install_is_idempotent() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
     let after_first = fs::read(&service).expect("read post-first");
@@ -103,6 +105,7 @@ fn tc02_install_is_idempotent() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
 
@@ -128,6 +131,7 @@ fn tc03_install_refuses_to_overwrite_existing_bak() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .failure()
         .stderr(predicates::str::contains(bak.to_string_lossy().to_string()));
@@ -146,6 +150,7 @@ fn tc04_uninstall_restores_byte_equality_from_bak() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
     assert!(bak.exists(), "bak must be present after install");
@@ -221,6 +226,7 @@ fn tc07_install_preserves_file_mode() {
         .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
 
@@ -244,6 +250,7 @@ fn tc08_install_honors_module_args() {
         ])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
 
@@ -270,6 +277,7 @@ fn tc09_install_honors_so_path() {
         ])
         .arg(dir.path())
         .arg("--yes")
+        .arg("--with-presenced=false")
         .assert()
         .success();
 
@@ -284,4 +292,38 @@ fn tc09_install_honors_so_path() {
 fn tc10_help_invocations_succeed() {
     syauth().args(["install-pam", "--help"]).assert().success();
     syauth().args(["uninstall-pam", "--help"]).assert().success();
+}
+
+#[test]
+fn tc11_install_pam_bundles_presenced_by_default() {
+    // S-009: `--with-presenced=true` is the default. The bundled path
+    // writes the systemd user unit alongside the PAM edit. We pass
+    // `--presenced-dry-run --presenced-unit-dir <tempdir> --presenced-from
+    // <fake>` so neither systemctl nor /usr/local/libexec is touched.
+    let dir = pam_dir();
+    write_fixture(dir.path(), SERVICE_NAME, FIXTURE_SUDO);
+    let presenced_dir = tempfile::tempdir().expect("presenced tempdir");
+    let fake = presenced_dir.path().join("fake-daemon-binary");
+    fs::write(&fake, b"").expect("touch fake");
+
+    let assert = syauth()
+        .args(["install-pam", "--service", SERVICE_NAME, "--pam-dir"])
+        .arg(dir.path())
+        .arg("--yes")
+        .arg("--presenced-dry-run")
+        .arg("--presenced-unit-dir")
+        .arg(presenced_dir.path())
+        .arg("--presenced-from")
+        .arg(&fake)
+        .assert()
+        .success();
+
+    let unit_path = presenced_dir.path().join("syauth-presenced.service");
+    assert!(unit_path.exists(), "bundled install must write the unit file");
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("would-run: systemctl --user daemon-reload"), "{stdout}");
+    assert!(
+        stdout.contains("would-run: systemctl --user enable --now syauth-presenced.service"),
+        "{stdout}"
+    );
 }

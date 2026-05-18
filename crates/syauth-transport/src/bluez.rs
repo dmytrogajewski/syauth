@@ -110,6 +110,27 @@ pub const SYAUTH_CHALLENGE_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a1
 /// ready. Desktop subscribes and awaits the next emission per call.
 pub const SYAUTH_RESPONSE_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0003);
 
+/// DEV-001: transient pair service the desktop hosts during a `syauth
+/// pair` window. Distinct from [`SYAUTH_GATT_SERVICE_UUID`] (the unlock
+/// channel) so a passive observer cannot confuse a pair-mode advertisement
+/// with a steady-state unlock peer. Lives only for the 60-second pair
+/// window; tear down on success or timeout.
+pub const SYAUTH_PAIR_SERVICE_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0101);
+
+/// DEV-001 pair-service characteristic: the desktop's Ed25519 host pubkey
+/// (32 bytes). Phone reads after LESC pairing succeeds; both ends combine
+/// host + phone pubkeys to derive the shared `bond_key` via
+/// `syauth_core::bond_key_from_pubkeys`.
+pub const SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0102);
+
+/// DEV-001 pair-service characteristic: the phone's Ed25519 phone pubkey
+/// (32 bytes). Phone writes after LESC pairing succeeds.
+pub const SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID: Uuid = Uuid::from_u128(0x5a4e8e3c_1c4c_4a17_9c81_d518a55a0103);
+
+/// Length in bytes of an Ed25519 public key on the pair-service
+/// characteristics. Sized identically to `syauth_core::bond::PUBKEY_LEN`.
+pub const PAIR_PUBKEY_LEN: usize = 32;
+
 /// How long [`BlueZBtPeer::connect`] spends scanning for a peer
 /// advertising [`SYAUTH_GATT_SERVICE_UUID`] before giving up with
 /// [`TransportError::Unreachable`]. Picked as half the caller-supplied
@@ -534,6 +555,82 @@ impl BlueZBtPeer {
     }
 }
 
+/// DEV-001: exchange Ed25519 pubkeys over the LESC-bonded link.
+///
+/// Connects to `device` (which the caller has already paired via
+/// `bluer::Device::pair`), discovers the transient pair service at
+/// [`SYAUTH_PAIR_SERVICE_UUID`], writes `host_pubkey` to the
+/// [`SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID`] characteristic, and reads the
+/// phone's pubkey from [`SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID`].
+///
+/// The link MUST already be LESC-bonded; the characteristics declare
+/// encrypted-only permissions so an attempt to read/write on an
+/// unencrypted link is rejected by BlueZ before bytes leave the host.
+///
+/// Returns the phone's 32-byte pubkey on success. The caller feeds
+/// `(host_pubkey, phone_pubkey)` into
+/// `syauth_core::bond_key_from_pubkeys` to derive the shared bond_key.
+///
+/// # Errors
+///
+/// * [`TransportError::Unreachable`] if the pair service is not exposed
+///   by the device (mistakenly connected to a non-syauth peer, or the
+///   desktop tore down its advertise window).
+/// * [`TransportError::Backend`] wrapping any underlying `bluer` error.
+/// * [`TransportError::BadFrame`] if the phone's pubkey is not 32 bytes.
+pub async fn connect_pair_service(
+    device: &bluer::Device,
+    host_pubkey: &[u8; PAIR_PUBKEY_LEN],
+) -> Result<[u8; PAIR_PUBKEY_LEN], TransportError> {
+    device.connect().await.map_err(|err| TransportError::Backend {
+        reason: format!("device.connect: {err}"),
+    })?;
+    let services = device.services().await.map_err(|err| TransportError::Backend {
+        reason: format!("device.services: {err}"),
+    })?;
+    let mut host_char: Option<Characteristic> = None;
+    let mut phone_char: Option<Characteristic> = None;
+    for svc in services {
+        let uuid = svc.uuid().await.map_err(|err| TransportError::Backend {
+            reason: format!("service.uuid: {err}"),
+        })?;
+        if uuid != SYAUTH_PAIR_SERVICE_UUID {
+            continue;
+        }
+        let chars = svc.characteristics().await.map_err(|err| TransportError::Backend {
+            reason: format!("service.characteristics: {err}"),
+        })?;
+        for ch in chars {
+            let cu = ch.uuid().await.map_err(|err| TransportError::Backend {
+                reason: format!("characteristic.uuid: {err}"),
+            })?;
+            if cu == SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID {
+                host_char = Some(ch);
+            } else if cu == SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID {
+                phone_char = Some(ch);
+            }
+        }
+        break;
+    }
+    let host_char = host_char.ok_or(TransportError::Unreachable)?;
+    let phone_char = phone_char.ok_or(TransportError::Unreachable)?;
+    host_char.write(host_pubkey).await.map_err(|err| TransportError::Backend {
+        reason: format!("host-pubkey.write: {err}"),
+    })?;
+    let phone_bytes = phone_char.read().await.map_err(|err| TransportError::Backend {
+        reason: format!("phone-pubkey.read: {err}"),
+    })?;
+    if phone_bytes.len() != PAIR_PUBKEY_LEN {
+        return Err(TransportError::BadFrame(syauth_core::FrameError::TooShort {
+            needed: PAIR_PUBKEY_LEN,
+            got: phone_bytes.len(),
+        }));
+    }
+    let mut out = [0u8; PAIR_PUBKEY_LEN];
+    out.copy_from_slice(&phone_bytes);
+    Ok(out)
+}
+
 /// Wait on the discovery stream for a `DeviceAdded` whose advertised
 /// service UUIDs include [`SYAUTH_GATT_SERVICE_UUID`]. Returns the first
 /// match. The caller wraps the future in a `tokio::time::timeout` so a
@@ -811,6 +908,21 @@ mod tests {
         let via_method = BlueZBtPeer::session_uuid_for(&TEST_BOND_KEY, TEST_MINUTE_ANCHOR);
         let via_free = session_uuid_for(&TEST_BOND_KEY, TEST_MINUTE_ANCHOR);
         assert_eq!(via_method, via_free);
+    }
+
+    // DEV-001: the pair-service UUID must be distinct from the unlock-service
+    // UUID so a passive observer cannot confuse a pair-mode advertisement
+    // with a steady-state unlock peer.
+    #[test]
+    fn pair_service_uuid_distinct_from_unlock_service_uuid() {
+        assert_ne!(
+            SYAUTH_PAIR_SERVICE_UUID, SYAUTH_GATT_SERVICE_UUID,
+            "pair vs unlock service UUIDs must differ"
+        );
+        assert_ne!(
+            SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID, SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID,
+            "host/phone pubkey char UUIDs must differ"
+        );
     }
 
     // Sanity: the instance accessor reuses the constructor's bond key.

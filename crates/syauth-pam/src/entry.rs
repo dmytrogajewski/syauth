@@ -168,9 +168,16 @@ where
 /// In the S-008 stub we read neither pointer; the parameters exist to match
 /// the ABI signature.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pam_sm_authenticate(_pamh: *mut c_void, _flags: c_int, _argc: c_int, _argv: *const *const c_char) -> c_int {
+pub unsafe extern "C" fn pam_sm_authenticate(_pamh: *mut c_void, _flags: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
     run_entry(|| {
-        let cfg = Config::from_env();
+        // SAFETY: libpam guarantees `argv` is either null or points
+        // to `argc` valid `*const c_char` entries. The helper
+        // returns an empty slice on any malformed pointer or
+        // negative `argc`, so the `Config::from_pam_argv` call is
+        // total even on hostile callers.
+        let argv_strings = unsafe { collect_pam_argv(argc, argv) };
+        let argv_refs: Vec<&str> = argv_strings.iter().map(String::as_str).collect();
+        let cfg = Config::from_pam_argv(&argv_refs);
         let outcome = auth::authenticate(&cfg);
         log_info(&format!(
             "syauth: unlock {} reason={} peer_id={}",
@@ -180,6 +187,48 @@ pub unsafe extern "C" fn pam_sm_authenticate(_pamh: *mut c_void, _flags: c_int, 
         ));
         outcome.to_pam_code()
     })
+}
+
+/// Copy libpam's `argv` into owned `String`s.
+///
+/// libpam passes module arguments as a `(argc, argv)` pair where
+/// `argv[i]` is a NUL-terminated C string. We copy each entry into
+/// an owned `String` so the caller can build a `&[&str]` slice
+/// without aliasing the libpam-owned memory across function
+/// boundaries. Non-UTF-8 entries are silently dropped — the only
+/// PAM arguments we recognise are the documented
+/// `socket=<path>` argument, which is always ASCII in practice.
+///
+/// # Safety
+///
+/// `argv` must be either null or point to `argc` valid C-string
+/// pointers, each of which is either null or points to a
+/// NUL-terminated byte sequence. libpam guarantees this on every
+/// `pam_sm_*` entry point.
+unsafe fn collect_pam_argv(argc: c_int, argv: *const *const c_char) -> Vec<String> {
+    if argv.is_null() || argc <= 0 {
+        return Vec::new();
+    }
+    let len = match usize::try_from(argc) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        // SAFETY: `i < argc` and `argv` carries `argc` valid
+        // entries per the function's safety doc.
+        let ptr = unsafe { *argv.add(i) };
+        if ptr.is_null() {
+            continue;
+        }
+        // SAFETY: `ptr` is a valid NUL-terminated C string per
+        // libpam's contract.
+        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
+        if let Ok(s) = cstr.to_str() {
+            out.push(s.to_owned());
+        }
+    }
+    out
 }
 
 /// `pam_sm_setcred` — required companion of `pam_sm_authenticate` for any

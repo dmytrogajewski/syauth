@@ -12,4 +12,6 @@ Options:
       --timeout-secs <TIMEOUT_SECS>  `ProvisionalBonded → Revoked` deadline in seconds. Default 60 [default: 60]
       --bond-dir <BOND_DIR>          Directory holding the bonds file. Defaults to SPEC's `/var/lib/syauth/`. Tests inject a tempdir [default: /var/lib/syauth]
       --yes                          Skip the interactive `[y/N]` OOB confirmation prompt. Tests only. Does NOT skip any safety-relevant gate (adapter LESC check, ambiguous peer check)
+      --waybar                       Surface the 6-digit LESC numeric-comparison code via the waybar applet (`sy syauth`) instead of stdin/`--yes`. The operator accepts or rejects the bond by clicking the bar entry; the privileged pair process and the unprivileged applet rendezvous over `${XDG_RUNTIME_DIR}/syauth/`. Mutually exclusive with `--yes`
+      --force                        Replace an existing bond record when the just-paired phone's `peer_id` already lives in the bond store. Without `--force` the pair flow fails with [`PairError::PeerAlreadyBonded`] and names the existing peer_id; the operator either revokes ( `syauth revoke --id <peer_id>`) and re-runs, or re-runs with `--force` to overwrite. Note: the OS-level LESC bond is untouched either way; `--force` only swaps the on-disk bond record
   -h, --help                         Print help

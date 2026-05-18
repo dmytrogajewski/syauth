@@ -45,16 +45,36 @@ sealed class LescResult {
      * BT LESC succeeded. [bondKey] is the negotiated bond key bytes; the
      * ViewModel passes it to `oobCalculator.compute(bondKey)`. [peerName]
      * is the peer's friendly name for the eventual Bonded(name) state.
+     * [keystoreAlias] and [phonePubkey] are the DEV-002 closure fields:
+     * the alias under which the phone's Ed25519 private key sits inside
+     * the Android Keystore enclave, and the 32-byte Ed25519 public key
+     * extracted from the Keystore-emitted certificate. Both are empty /
+     * zero-filled when the test wiring constructs a `Bonded` without
+     * actually minting a Keystore keypair; the production path always
+     * populates them.
      */
-    data class Bonded(val bondKey: ByteArray, val peerName: String) : LescResult() {
+    data class Bonded(
+        val bondKey: ByteArray,
+        val peerName: String,
+        val keystoreAlias: String = "",
+        val phonePubkey: ByteArray = ByteArray(0),
+    ) : LescResult() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Bonded) return false
-            return bondKey.contentEquals(other.bondKey) && peerName == other.peerName
+            return bondKey.contentEquals(other.bondKey) &&
+                peerName == other.peerName &&
+                keystoreAlias == other.keystoreAlias &&
+                phonePubkey.contentEquals(other.phonePubkey)
         }
 
-        override fun hashCode(): Int =
-            31 * bondKey.contentHashCode() + peerName.hashCode()
+        override fun hashCode(): Int {
+            var result = bondKey.contentHashCode()
+            result = 31 * result + peerName.hashCode()
+            result = 31 * result + keystoreAlias.hashCode()
+            result = 31 * result + phonePubkey.contentHashCode()
+            return result
+        }
     }
 
     data class Failed(val reason: String) : LescResult()

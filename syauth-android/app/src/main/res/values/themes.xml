@@ -7,4 +7,13 @@
 -->
 <resources>
     <style name="Theme.SyauthAndroid" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+      Roadmap item S-014 — `ChallengeApprovalActivity` is rendered
+      over the keyguard as a transparent surface so the Compose tree
+      composites on top of whatever the user was last looking at.
+      `Theme.Translucent.NoTitleBar` is the AOSP-stable parent that
+      keeps the underlying screen visible.
+    -->
+    <style name="Theme.SyauthTranslucent" parent="android:Theme.Translucent.NoTitleBar" />
 </resources>

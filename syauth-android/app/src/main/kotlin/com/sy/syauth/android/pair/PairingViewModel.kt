@@ -179,11 +179,14 @@ class PairingViewModel(
                 pickedPeer = pickedPeer?.copy(name = result.peerName)
                     ?: PeerHandle(id = result.peerName, name = result.peerName)
                 val emoji = oobCalculator.compute(result.bondKey)
-                // Stash the bond key for the eventual persist() call BEFORE
-                // emitting the new state, so a same-thread observer who
-                // immediately reacts to OobConfirming sees a consistent
-                // stashedBondKey on the subsequent onOobYesTapped().
+                // Stash the bond key + Keystore fields for the eventual
+                // persist() call BEFORE emitting the new state, so a
+                // same-thread observer who immediately reacts to
+                // OobConfirming sees consistent stash on the subsequent
+                // onOobYesTapped().
                 stashedBondKey = result.bondKey
+                stashedKeystoreAlias = result.keystoreAlias
+                stashedPhonePubkey = result.phonePubkey
                 _state.value = PairingState.OobConfirming(emoji)
             }
             is LescResult.Failed -> {
@@ -195,6 +198,12 @@ class PairingViewModel(
 
     /** Bond key carried from LescResult.Bonded to onOobYesTapped. */
     private var stashedBondKey: ByteArray? = null
+
+    /** Keystore alias carried from LescResult.Bonded to onOobYesTapped (DEV-002). */
+    private var stashedKeystoreAlias: String = ""
+
+    /** Phone Ed25519 pubkey carried from LescResult.Bonded to onOobYesTapped (DEV-002). */
+    private var stashedPhonePubkey: ByteArray = ByteArray(0)
 
     /**
      * User tapped Yes on the OOB-match question. Persist the bond,
@@ -227,6 +236,8 @@ class PairingViewModel(
                     peerId = peer.id,
                     peerName = peer.name,
                     bondKey = bondKey,
+                    keystoreAlias = stashedKeystoreAlias,
+                    phonePubkey = stashedPhonePubkey,
                 ),
             )
         } catch (e: PersistError) {

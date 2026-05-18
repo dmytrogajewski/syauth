@@ -77,6 +77,21 @@ pub const LIST_FIELD_SEP: char = '\t';
 /// Banner printed when `syauth list` finds no bonds.
 pub const LIST_EMPTY_HINT: &str = "(no bonds; run `syauth pair` to add one)";
 
+/// Subdirectory of `--bond-dir` where `pam_syauth` reads the raw
+/// 32-byte symmetric bond_key per peer (`<peer_id>.bin`). Matches
+/// `crates/syauth-pam/src/auth.rs::BOND_KEY_DIR_NAME`.
+pub const PAM_BOND_KEY_DIR_NAME: &str = "keys";
+
+/// Extension `pam_syauth` expects on the per-peer bond_key file.
+/// Matches `crates/syauth-pam/src/auth.rs::BOND_KEY_FILE_EXT`.
+pub const PAM_BOND_KEY_FILE_EXT: &str = ".bin";
+
+/// File mode `pam_syauth` requires on `<peer_id>.bin`. The PAM module
+/// refuses the file (returns `secret-not-found`) if any group/other
+/// bit is set, so the pair flow writes the file in 0600 from the
+/// start.
+pub const PAM_BOND_KEY_FILE_MODE: u32 = 0o600;
+
 // ---------------------------------------------------------------------------
 // CLI options.
 // ---------------------------------------------------------------------------
@@ -108,6 +123,26 @@ pub struct PairOpts {
     /// peer check).
     #[arg(long)]
     pub yes: bool,
+
+    /// Surface the 6-digit LESC numeric-comparison code via the waybar
+    /// applet (`sy syauth`) instead of stdin/`--yes`. The operator
+    /// accepts or rejects the bond by clicking the bar entry; the
+    /// privileged pair process and the unprivileged applet rendezvous
+    /// over `${XDG_RUNTIME_DIR}/syauth/`. Mutually exclusive with
+    /// `--yes`.
+    #[arg(long, conflicts_with = "yes")]
+    pub waybar: bool,
+
+    /// Replace an existing bond record when the just-paired phone's
+    /// `peer_id` already lives in the bond store. Without `--force`
+    /// the pair flow fails with [`PairError::PeerAlreadyBonded`] and
+    /// names the existing peer_id; the operator either revokes (
+    /// `syauth revoke --id <peer_id>`) and re-runs, or re-runs with
+    /// `--force` to overwrite. Note: the OS-level LESC bond is
+    /// untouched either way; `--force` only swaps the on-disk bond
+    /// record.
+    #[arg(long)]
+    pub force: bool,
 
     /// S-019 e2e seam: accept the OOB hex code directly and bypass the
     /// interactive `[y/N]` prompt entirely. Hidden from `--help` so an
@@ -280,10 +315,29 @@ pub enum PairError {
         reason: RevokeReason,
     },
 
-    /// Bond store I/O or contract failure (already-bonded, future schema,
-    /// etc.). Wraps the upstream [`BondError`] verbatim.
+    /// Bond store I/O or contract failure (future schema, missing
+    /// file, etc.). Wraps the upstream [`BondError`] verbatim. The
+    /// [`BondError::AlreadyBonded`] case is funnelled through the
+    /// typed [`PairError::PeerAlreadyBonded`] variant below so the
+    /// CLI can print a remediation hint; every other [`BondError`]
+    /// kind reaches this variant unchanged.
     #[error("bond store error: {0}")]
     Bond(#[from] BondError),
+
+    /// The just-paired phone's `peer_id` already exists in the bond
+    /// store and the operator did not pass `--force`. The CLI's
+    /// stderr renderer turns this into a multi-line hint:
+    ///   * the `peer_id` of the duplicate row,
+    ///   * the exact `syauth revoke --id <peer_id>` invocation to
+    ///     drop the old record,
+    ///   * an `--force` hint for the same-operator re-pair path.
+    #[error(
+        "peer already paired with this desktop\n  peer_id={peer_id}\n  hint: rerun with `--force` to replace the existing bond,\n        or run `syauth revoke --id {peer_id}` first."
+    )]
+    PeerAlreadyBonded {
+        /// The duplicate `peer_id` (32-char lowercase hex).
+        peer_id: String,
+    },
 
     /// Backend reported a failure that is not one of the typed variants.
     #[error("pair backend error: {reason}")]
@@ -518,6 +572,31 @@ pub fn bonds_path(bond_dir: &Path) -> PathBuf {
     bond_dir.join(BONDS_FILE_NAME)
 }
 
+/// Path `pam_syauth` reads the raw 32-byte bond_key from for a given
+/// `peer_id`. Tests inject a tempdir as `bond_dir`; production uses
+/// `/var/lib/syauth/keys/<peer_id>.bin`.
+pub fn pam_bond_key_path(bond_dir: &Path, peer_id: &str) -> PathBuf {
+    bond_dir
+        .join(PAM_BOND_KEY_DIR_NAME)
+        .join(format!("{peer_id}{PAM_BOND_KEY_FILE_EXT}"))
+}
+
+/// Write the 32-byte symmetric bond_key for `peer_id` at the path
+/// `pam_syauth` looks at on every unlock. Creates the `keys/`
+/// subdirectory (mode 0700) if it does not exist; writes the file in
+/// 0600 from the start so `pam_syauth` does not reject it on the
+/// permission-mask gate.
+fn write_pam_bond_key(bond_dir: &Path, peer_id: &str, bond_key: &[u8]) -> Result<(), PairError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let keys_dir = bond_dir.join(PAM_BOND_KEY_DIR_NAME);
+    std::fs::create_dir_all(&keys_dir).map_err(PairError::Io)?;
+    let _ = std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700));
+    let path = pam_bond_key_path(bond_dir, peer_id);
+    std::fs::write(&path, bond_key).map_err(PairError::Io)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(PAM_BOND_KEY_FILE_MODE)).map_err(PairError::Io)?;
+    Ok(())
+}
+
 /// Drive the pair flow against `backend`, reading operator confirmation from
 /// `reader` and writing UI to `writer`.
 ///
@@ -606,8 +685,27 @@ pub async fn run_pair_with_io(
     let _phase_provisional = PairingPhase::ProvisionalBonded { peer_id: peer_id.clone() };
     let path = bonds_path(&opts.bond_dir);
     let mut store = BondStore::load(&path)?;
-    store.add(bond)?;
+    match store.add(bond.clone()) {
+        Ok(()) => {}
+        Err(BondError::AlreadyBonded { peer_id: existing }) => {
+            if opts.force {
+                store.remove(&existing)?;
+                store.add(bond)?;
+                writeln!(writer, "replaced existing bond peer_id={existing}")?;
+            } else {
+                return Err(PairError::PeerAlreadyBonded { peer_id: existing });
+            }
+        }
+        Err(other) => return Err(other.into()),
+    }
     store.save(&path)?;
+    // pam_syauth reads the raw 32-byte bond_key from
+    // `<bond_dir>/keys/<peer_id>.bin` (0600). Without this file the
+    // PAM module fails with `secret-not-found` even though the bond
+    // record itself is on disk. Write the keys file atomically beside
+    // `bonds.toml`; the OOB-confirmed bond_key from LESC is the
+    // symmetric MAC key the unlock channel needs.
+    write_pam_bond_key(&opts.bond_dir, &peer_id, &outcome.bond_key)?;
     writeln!(writer, "bonded {} id={peer_id}; run `syauth list` to verify", chosen.name)?;
     Ok(PairingPhase::Bonded)
 }
@@ -857,7 +955,9 @@ mod tests {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             bond_dir: td.path().join("syauth"),
             yes: false,
+            waybar: false,
             scripted_oob: Some(SCRIPTED_TEST_OOB_HEX.to_owned()),
+            force: false,
         };
 
         let phase = run_pair_with_io(&opts, &ScriptedTestBackend, &mut reader, &mut writer)
@@ -881,5 +981,139 @@ mod tests {
         let bonds_file = bonds_path(&opts.bond_dir);
         let store = BondStore::load(&bonds_file).expect("bond store loads");
         assert_eq!(store.list().len(), 1, "exactly one bond persisted");
+    }
+
+    /// Helper: build a [`PairOpts`] for the already-bonded re-pair tests.
+    fn already_bonded_opts(td: &tempfile::TempDir, force: bool) -> PairOpts {
+        PairOpts {
+            adapter: DEFAULT_ADAPTER_NAME.to_owned(),
+            peer: None,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            bond_dir: td.path().join("syauth"),
+            yes: true,
+            waybar: false,
+            scripted_oob: None,
+            force,
+        }
+    }
+
+    /// First pair lands; second pair with the same `ScriptedTestBackend`
+    /// (same pubkey → same `peer_id`) fails with the typed
+    /// [`PairError::PeerAlreadyBonded`] when `--force` is NOT set. The
+    /// error's `Display` carries the existing peer_id plus the two
+    /// remediation lines (`--force` hint and `syauth revoke --id` hint).
+    #[tokio::test]
+    async fn second_pair_without_force_returns_peer_already_bonded_with_hints() {
+        use std::io::Cursor;
+
+        let td = tempfile::tempdir().expect("tempdir for bonds");
+
+        // First pair — must succeed and write exactly one bond.
+        let opts_first = already_bonded_opts(&td, false);
+        let mut reader_first = Cursor::new(Vec::<u8>::new());
+        let mut writer_first: Vec<u8> = Vec::new();
+        run_pair_with_io(&opts_first, &ScriptedTestBackend, &mut reader_first, &mut writer_first)
+            .await
+            .expect("first pair must reach Bonded");
+        let bonds_file = bonds_path(&opts_first.bond_dir);
+        assert_eq!(BondStore::load(&bonds_file).expect("store loads after first pair").list().len(), 1);
+
+        // Second pair against the same fixture — same pubkey → same
+        // peer_id → must fail with the typed variant.
+        let opts_second = already_bonded_opts(&td, false);
+        let mut reader_second = Cursor::new(Vec::<u8>::new());
+        let mut writer_second: Vec<u8> = Vec::new();
+        let err = run_pair_with_io(&opts_second, &ScriptedTestBackend, &mut reader_second, &mut writer_second)
+            .await
+            .expect_err("second pair without --force must fail");
+        let expected_peer_id = peer_id_from_pubkey(&SCRIPTED_TEST_PUBKEY);
+        match &err {
+            PairError::PeerAlreadyBonded { peer_id } => assert_eq!(peer_id, &expected_peer_id),
+            other => panic!("expected PeerAlreadyBonded, got: {other:?}"),
+        }
+        let rendered = err.to_string();
+        assert!(rendered.contains(&expected_peer_id), "Display must carry peer_id; got: {rendered}");
+        assert!(rendered.contains("--force"), "Display must point at --force; got: {rendered}");
+        assert!(
+            rendered.contains("syauth revoke --id"),
+            "Display must point at syauth revoke --id; got: {rendered}"
+        );
+
+        // Defense in depth: the store still has exactly one bond
+        // (the failed re-pair must NOT touch the existing record).
+        let store_after = BondStore::load(&bonds_file).expect("store loads after second pair");
+        assert_eq!(store_after.list().len(), 1, "failed re-pair must not mutate the store");
+    }
+
+    /// `--force` swaps the existing bond record in place; the writer
+    /// captures the `replaced existing bond peer_id=...` log line; the
+    /// store still ends with exactly one bond.
+    #[tokio::test]
+    async fn second_pair_with_force_replaces_existing_bond_in_place() {
+        use std::io::Cursor;
+
+        let td = tempfile::tempdir().expect("tempdir for bonds");
+
+        // First pair — same as the previous test.
+        let opts_first = already_bonded_opts(&td, false);
+        let mut reader_first = Cursor::new(Vec::<u8>::new());
+        let mut writer_first: Vec<u8> = Vec::new();
+        run_pair_with_io(&opts_first, &ScriptedTestBackend, &mut reader_first, &mut writer_first)
+            .await
+            .expect("first pair must reach Bonded");
+        let bonds_file = bonds_path(&opts_first.bond_dir);
+
+        // Second pair WITH `--force`. Must reach Bonded; writer must
+        // contain the replacement log line; store must still have
+        // exactly one bond keyed on the same peer_id.
+        let opts_second = already_bonded_opts(&td, true);
+        let mut reader_second = Cursor::new(Vec::<u8>::new());
+        let mut writer_second: Vec<u8> = Vec::new();
+        let phase = run_pair_with_io(&opts_second, &ScriptedTestBackend, &mut reader_second, &mut writer_second)
+            .await
+            .expect("second pair with --force must reach Bonded");
+        assert_eq!(phase, PairingPhase::Bonded);
+
+        let out = String::from_utf8_lossy(&writer_second);
+        let expected_peer_id = peer_id_from_pubkey(&SCRIPTED_TEST_PUBKEY);
+        let expected_replace_line = format!("replaced existing bond peer_id={expected_peer_id}");
+        assert!(
+            out.contains(&expected_replace_line),
+            "writer must log replacement; expected {expected_replace_line:?} in {out:?}"
+        );
+
+        let store_after = BondStore::load(&bonds_file).expect("store loads after --force re-pair");
+        assert_eq!(store_after.list().len(), 1, "exactly one bond after --force re-pair");
+        assert_eq!(store_after.list()[0].peer_id, expected_peer_id);
+    }
+
+    /// `run_pair_with_io` must write the per-peer bond_key file
+    /// `pam_syauth` reads on every unlock, otherwise the desktop
+    /// pair completes but `pam_syauth` fails with
+    /// `secret-not-found`. Pins the file at
+    /// `<bond_dir>/keys/<peer_id>.bin`, length 32, mode 0600.
+    #[tokio::test]
+    async fn pair_writes_pam_bond_key_file_at_expected_path() {
+        use std::{io::Cursor, os::unix::fs::PermissionsExt as _};
+
+        let td = tempfile::tempdir().expect("tempdir for bonds");
+        let opts = already_bonded_opts(&td, false);
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let mut writer: Vec<u8> = Vec::new();
+        run_pair_with_io(&opts, &ScriptedTestBackend, &mut reader, &mut writer)
+            .await
+            .expect("pair must reach Bonded");
+
+        let expected_peer_id = peer_id_from_pubkey(&SCRIPTED_TEST_PUBKEY);
+        let path = pam_bond_key_path(&opts.bond_dir, &expected_peer_id);
+        let meta = std::fs::metadata(&path).expect("pam bond_key file must exist");
+        assert_eq!(meta.len(), 32, "pam bond_key file must be 32 bytes");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            PAM_BOND_KEY_FILE_MODE,
+            "pam bond_key file must be 0600"
+        );
+        let bytes = std::fs::read(&path).expect("pam bond_key file readable");
+        assert_eq!(bytes, SCRIPTED_TEST_BOND_KEY.to_vec(), "file bytes must equal LescOutcome.bond_key");
     }
 }

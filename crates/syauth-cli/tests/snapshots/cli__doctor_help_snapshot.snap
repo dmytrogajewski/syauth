@@ -1,0 +1,18 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"doctor\", \"--help\"])"
+---
+Inspect the unlock chain: daemon liveness, bonds file, keys file modes, BlueZ adapter, systemd user unit state, audit-log tail, and the `XDG_RUNTIME_DIR` SSH-session caveat. Emits one greppable `key=value` line per probe plus a final `doctor=ok|warn|fail` summary. `--json` emits the same data as a typed JSON object for tooling
+
+Usage: syauth doctor [OPTIONS]
+
+Options:
+      --socket <SOCKET>          Override the resolved Unix-socket path. If unset, defaults to `${XDG_RUNTIME_DIR}/syauth/auth.sock` (or `/run/user/<uid>/syauth/auth.sock` when the env is missing, per SPEC §8 SSH-session caveat)
+      --bonds-file <BONDS_FILE>  Bonds file path. Defaults to SPEC's `/var/lib/syauth/bonds.toml` [default: /var/lib/syauth/bonds.toml]
+      --keys-dir <KEYS_DIR>      Keys directory. Defaults to SPEC's `/var/lib/syauth/keys` [default: /var/lib/syauth/keys]
+      --audit-log <AUDIT_LOG>    Audit log file. Defaults to SPEC's `/var/lib/syauth/last.log` [default: /var/lib/syauth/last.log]
+      --json                     Emit the probe data as a typed JSON object via `serde_json::to_string_pretty`. Same schema as the greppable output, different surface for tooling
+      --skip-bluez               Skip the BlueZ DBus probe. CI hosts without bluer-on-DBus would otherwise see `unknown`; the flag makes the skip explicit and keeps test output deterministic
+      --skip-systemctl           Skip the `systemctl --user is-active` shell-out. Same motivation as `--skip-bluez`
+      --skip-daemon              Skip the daemon socket probe entirely (record `unknown`). Useful for keys-only audit runs from CI
+  -h, --help                     Print help

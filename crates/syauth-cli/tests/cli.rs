@@ -119,8 +119,12 @@ fn revoke_help_snapshot() {
 }
 
 #[test]
-fn status_help_snapshot() {
-    insta::assert_snapshot!("status_help_snapshot", help_stdout(&["status", "--help"]));
+fn status_snapshot() {
+    // S-017 DoD: `tests/snapshots/cli__status_snapshot.snap` updated +
+    // reviewed. The S-012 `status_help_snapshot.snap` is preserved
+    // in-tree as the prior reference; this snapshot pins the S-017
+    // surface (`--socket`, `--watch`, `--json`).
+    insta::assert_snapshot!("status_snapshot", help_stdout(&["status", "--help"]));
 }
 
 #[test]
@@ -131,6 +135,16 @@ fn install_pam_help_snapshot() {
 #[test]
 fn uninstall_pam_help_snapshot() {
     insta::assert_snapshot!("uninstall_pam_help_snapshot", help_stdout(&["uninstall-pam", "--help"]));
+}
+
+#[test]
+fn install_presenced_help_snapshot() {
+    insta::assert_snapshot!("install_presenced_help_snapshot", help_stdout(&["install-presenced", "--help"]));
+}
+
+#[test]
+fn doctor_help_snapshot() {
+    insta::assert_snapshot!("doctor_help_snapshot", help_stdout(&["doctor", "--help"]));
 }
 
 // ---------------------------------------------------------------------------

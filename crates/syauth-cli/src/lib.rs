@@ -13,11 +13,13 @@
 //! - specs/journeys/JOURNEY-S-012-day2-cli.md
 //! - specs/journeys/JOURNEY-S-013-pam-install-helper.md
 
+pub mod doctor;
 pub mod install_pam;
+pub mod install_presenced;
 pub mod list;
 pub mod oob;
 pub mod pair;
-pub mod provision;
+pub mod pair_backend;
 pub mod revoke;
 pub mod status;
 pub mod uninstall_pam;

@@ -194,35 +194,37 @@ lifecycle; we own only the GATT setup/teardown within the binding's
 lifetime. The result: zero radio usage when the bonded peer is out of
 range, and zero process-keepalive battery cost.
 
-## Provision-file bootstrap (v0.1 demo)
+## First-run pairing (LESC + app-OOB)
 
-For v0.1 the LESC pair flow is stubbed on both ends: the desktop's
-phone-side BLE backend and the phone's `StubPairBackend` both return
-"real-radio path lands in a future roadmap item". To still deliver a
-working end-to-end unlock, the desktop's `syauth provision-test`
-subcommand generates all shared material out of band and emits a
-single TOML package (`syauth-provision.toml`) carrying the 32-byte
-`bond_key`, the phone's Ed25519 signing-key seed, and the bond
-metadata. The operator transports this file to the phone over a USB
-cable (`adb push syauth-provision.toml /sdcard/Download/`). On first
-launch the phone reads it, persists the bond to app-private storage,
-and deletes the source file from `Downloads/` so the plaintext key
-does not linger in shared storage. Subsequent launches read the
-persisted record directly; the provision file is consumed exactly
-once per install.
+Pairing follows SPEC §3.2 D5: LE Secure Connections numeric comparison
+followed by an app-level 4-word OOB confirmation. Run the desktop CLI
+and the phone app at the same time:
 
-The Ed25519 seed is stored in plaintext under `context.filesDir`
-(specifically `syauth-bond.toml` — the same shape as the provision
-file). This is acceptable for v0.1 because the directory is sandboxed
-to the app's UID and the device threat model assumes an unrooted
-device, but it is **not** the long-term design. The canonical v0.2
-path will wrap the seed in an Android-Keystore-backed AES cipher and
-require a fresh BiometricPrompt gesture to decrypt; the
-`SigningKeyProvider` seam in `approve/SigningKeyProvider.kt` exists
-precisely so this swap is local. The provision package itself
-contains a private key and must NEVER be transported over a network
-or shared storage — only over a trusted USB cable under the
-operator's physical control.
+1. **Desktop:** `syauth pair --adapter hci0`. The CLI powers the
+   adapter on, registers a BlueZ `Agent` with `DisplayYesNo`
+   capability, and starts advertising a rotating pair-mode UUID.
+2. **Phone:** open the syauth app and tap **Pair**. The app scans for
+   the pair-mode UUID; on a match it lists the desktop's hostname for
+   the operator to pick.
+3. **OS-level numeric comparison.** BlueZ surfaces the 6-digit
+   passkey via the agent on the desktop side; Android's
+   `ACTION_PAIRING_REQUEST` broadcast carries the same number on the
+   phone side. The operator confirms the codes match (Y on both).
+4. **App-level OOB.** Over the now-LESC-bonded link, the desktop
+   reads the phone's Ed25519 pubkey and writes its own host pubkey
+   into the transient pair-service. Both ends derive the shared
+   `bond_key` via `syauth_core::bond_key_from_pubkeys` and render the
+   same 4-word OOB code. The operator confirms a second time.
+
+On success both sides write a `Bond` record (`/var/lib/syauth/bonds.toml`
+on the desktop; app-private `syauth-bond.toml` on the phone). The
+operator never edits a config file and never uses adb.
+
+The cryptographic invariant the two confirmations enforce: an attacker
+who completes the BT-spec MITM (impossible if Phase 3 numeric
+comparison is honest) would still need to fake a pubkey substitution
+that both ends accept on Phase 4 — and the 4-word OOB derivation
+makes that visible to the operator.
 
 ## Future setup steps
 

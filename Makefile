@@ -231,6 +231,38 @@ else
 endif
 
 # =============================================================================
+# E2E unlock-latency benchmark (S-019: unlock-proximity ROADMAP)
+# =============================================================================
+#
+# SPEC §4.3 Performance: drives `pamtester syauth-test $USER
+# authenticate` $ITERATIONS times against the paired phone with
+# `SYAUTH_REAL_RADIOS=1`, parses /var/lib/syauth/last.log for
+# elapsed-ms (audit format SPEC §3 #8 + JOURNEY-S-006), computes
+# p50 / p95 / p99 (nearest-rank), emits one JSON line on stdout,
+# and exits non-zero on p50 > 1500 ms OR p99 > 2000 ms OR any
+# failure.
+#
+# Gated behind SYAUTH_REAL_RADIOS=1 mirroring the e2e-real /
+# DEV-004 pattern so a developer box without a paired phone stays
+# green by default.
+#
+# The script's percentile math + JSON shape + exit-code matrix
+# are exercised hermetically in CI via the Rust integration test
+# `crates/syauth-cli/tests/e2e_unlock_script.rs`, so a regression
+# in the gate logic itself is caught by `make test` without real
+# radios.
+
+## e2e-unlock: Run the SPEC §4.3 100-unlock latency benchmark
+##            (requires SYAUTH_REAL_RADIOS=1 + connected phone + paired desktop).
+.PHONY: e2e-unlock
+e2e-unlock:
+ifneq ($(SYAUTH_REAL_RADIOS),1)
+	@echo "e2e-unlock requires SYAUTH_REAL_RADIOS=1; refusing"
+	@exit 1
+endif
+	@scripts/e2e-unlock.sh
+
+# =============================================================================
 # Release packaging targets (S-021)
 # =============================================================================
 #

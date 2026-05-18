@@ -1,0 +1,126 @@
+# syauth-presenced — long-running desktop user-service that owns the
+# BlueZ adapter for the unlock channel. Roadmap row S-001 only scaffolds
+# the process: clap-derived arg parsing, syslog-tagged tracing
+# subscriber, single-instance pidfile lock at
+# `${XDG_RUNTIME_DIR}/syauth/presenced.pid`, empty tokio loop, and a
+# SIGINT/SIGTERM shutdown path. Every later S-NNN row in
+# `specs/unlock-proximity/ROADMAP.md` layers on top of this skeleton.
+
+[package]
+name = "syauth-presenced"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "syauth long-running desktop daemon for the unlock channel"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "syauth-presenced"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Typed errors with `Display` impls; same pin as the rest of the workspace.
+thiserror = "2"
+# `anyhow` for the binary entrypoint's `Result<()>` plumbing, matching
+# the syauth-cli convention.
+anyhow = "1"
+# clap derive — matches syauth-cli's pattern for `--help` snapshots and
+# default-path documentation.
+clap = { version = "4", features = ["derive"] }
+# Async runtime: signal handling via `tokio::signal::unix`, the
+# multi-thread event loop, and (S-002) the `UnixListener` accept loop
+# + async read/write of the length-prefixed CBOR frames over the
+# socket.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util"] }
+# Typed serialization for the RPC `Request` / `Response` enums. The
+# wire format is `#[serde(tag = "kind")]` so adding a new variant in
+# a later S-NNN row (e.g. S-005's `Reload`) does not break existing
+# `Challenge` callers.
+serde = { version = "1", features = ["derive"] }
+# CBOR encoder/decoder per SPEC §3 Decisions row "PAM ↔ daemon
+# transport" (ciborium chosen explicitly over `serde_cbor` in the
+# spec's §4.7 Dependencies).
+ciborium = "0.2"
+# Compact byte-vector encoding for the `nonce` / `signature` fields
+# so the CBOR payload stays tight on the wire.
+serde_bytes = "0.11"
+# Structured logging surface; later rows add spans across the RPC and
+# BLE paths.
+tracing = "0.1"
+# `EnvFilter` for `--log-level`, plus the `fmt` subscriber that the
+# SPEC §3 calls "syslog tag `syauth-presenced`". Until S-009 wires a
+# real `libsystemd` journal sink, the `fmt` layer with a constant
+# `syauth-presenced` prefix is the syslog-tagged equivalent — every
+# emitted line carries the tag verbatim so `journalctl -t
+# syauth-presenced` (when run under systemd-journald's stdout
+# capture) filters correctly.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Low-level `fcntl(F_SETLK)` advisory locking + `unlink` for the
+# single-instance pidfile lock, plus `getsockopt(SO_PEERCRED)` on the
+# Unix-domain socket connections (S-002 SPEC §7
+# T-Local-Privilege-Escalation defense). `geteuid()` for the default
+# expected-uid configuration.
+nix = { version = "0.29", features = ["fs", "signal", "user", "socket"] }
+# `libc::flock` (struct layout) for the F_OFD_SETLK argument and
+# `libc::F_WRLCK` constants. Matches the workspace's transitive pin.
+libc = "0.2"
+# S-004: the orchestrator reads `Bond` metadata for the rotation
+# audit line and reuses `bond_key_from_pubkeys` / `BondStore` shapes.
+syauth-core = { version = "0.1", path = "../syauth-core" }
+# S-004: the `Peripheral` trait + `session_uuid_for` derivation +
+# `BOND_KEY_BYTES` width all live in the transport crate. The
+# `test-fake` feature ships the radio-free `FakePeripheral` test
+# double for the rotation integration test; it is a default feature
+# of `syauth-transport` so no explicit `features` list is required.
+syauth-transport = { version = "0.1", path = "../syauth-transport" }
+# S-004: 128-bit UUID type for the rotation audit short-hex render.
+uuid = { version = "1" }
+# S-005: belt-and-suspenders inotify watcher on `bonds.toml`. The
+# pair flow already signals the daemon via `SIGHUP`; the watcher
+# converges the on-disk truth back into the running daemon when the
+# signal delivery is lost (PID file race, daemon restart). Pinned at
+# major version 8 so a future breaking-change in `notify 9` does not
+# silently break the daemon. `default-features = false` drops the
+# macOS-only FSEvent backend; on Linux the crate uses inotify with
+# no feature gate.
+notify = { version = "8", default-features = false }
+# S-006: fresh 16-byte challenge nonce sourced from the OS RNG. The
+# same crate already underpins `crates/syauth-pam/src/auth.rs::pam_sm_authenticate`,
+# so the workspace dependency surface is unchanged.
+getrandom = "0.3"
+# S-006: hex render of the challenge nonce for the audit log line
+# (`{peer_id, nonce_hex, ...}`). The crate has zero transitive deps
+# beyond `core`, so the workspace closure stays tight.
+hex = "0.4"
+
+[dev-dependencies]
+# Smoke test spawns the release binary and drives it through SIGTERM.
+tempfile = "3"
+# Sends SIGTERM via the same `nix` surface the daemon uses; the
+# `user` feature exposes `geteuid()` for the S-002 expected-uid
+# assertions.
+nix = { version = "0.29", features = ["signal", "user"] }
+# Async runtime + `#[tokio::test]` macro for the in-process socket
+# smoke test of S-002. `test-util` adds `tokio::time::pause` /
+# `tokio::time::advance` for the S-004 rotation test.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "test-util"] }
+# S-004 rotation test inspects emitted `tracing` events via a tiny
+# in-test recorder layer; the `Subscriber` + `Layer` traits live in
+# `tracing-subscriber`. (The production dep already pulls this in,
+# but we declare it explicitly here so `dev-only` test code has a
+# stable handle to the same crate version.)
+tracing-subscriber = { version = "0.3" }
+# S-004 rotation test constructs a `Bond` fixture; the `created_at`
+# field is a `time::OffsetDateTime`.
+time = { version = "0.3", features = ["macros"] }
+# S-004 rotation test asserts that the orchestrator publishes
+# `session_uuid_for(bond_key, minute)` into `FakePeripheral`; the
+# transport's `Peripheral` trait talks `uuid::Uuid` and the rotation
+# audit short-hex render uses the same crate.
+uuid = { version = "1" }

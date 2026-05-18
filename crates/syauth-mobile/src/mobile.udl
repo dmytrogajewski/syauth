@@ -31,15 +31,28 @@ namespace syauth_mobile {
   bytes sign_challenge_response(bytes signing_key, bytes frame_bytes);
 
   // Build the full encoded response frame the desktop's `pam_syauth`
-  // recv_frame expects. Wraps the Ed25519 signature over the challenge
-  // in a wire-format frame whose body is MAC-tagged under `bond_key`.
+  // recv_frame expects. Wraps the Ed25519 signature (produced by the
+  // foreign-implemented `FrameSigner` — production: a Kotlin
+  // `KeystoreFrameSigner` that delegates to Android Keystore's
+  // hardware-backed Ed25519 key) over the challenge in a wire-format
+  // frame whose body is MAC-tagged under `bond_key`. Closes DEV-002:
+  // the Ed25519 private key NEVER crosses the JVM <-> Rust boundary.
   [Throws=MobileError]
-  bytes build_response_frame(bytes bond_key, bytes signing_key, bytes challenge_frame_bytes);
+  bytes build_response_frame(bytes bond_key, FrameSigner signer, bytes challenge_frame_bytes);
 
   // Derive the 4-word emoji-prefixed OOB code for `bond_key`. Mirrors
   // `crates/syauth-cli/src/oob.rs::oob_code_for_bond`.
   [Throws=MobileError]
   sequence<string> oob_code_for_bond(bytes bond_key);
+
+  // Derive the 16-byte rotating session UUID the desktop advertises
+  // for `bond_key` at wall-clock `minute` (unix-epoch-seconds / 60).
+  // DEV-003: the phone uses this to build its `BluetoothLeScanner`
+  // `ScanFilter` set so it matches the desktop's advertisement
+  // without depending on a fixed service UUID. Mirrors
+  // `syauth_transport::session_uuid_for` byte-for-byte.
+  [Throws=MobileError]
+  bytes session_uuid_for_bond(bytes bond_key, i64 minute);
 };
 
 // Typed error variants surfaced to Kotlin/Swift. Every `reason` is a
@@ -58,4 +71,17 @@ interface MobileError {
 dictionary Invite {
   string host_name;
   bytes host_pubkey;
+};
+
+// Synchronous Ed25519-sign-over-bytes upcall implemented by the
+// foreign side (Kotlin / Swift). Production wires a Kotlin
+// `KeystoreFrameSigner` that opens `Signature.getInstance("Ed25519")`
+// initialised against an Android Keystore Ed25519 `PrivateKey` gated
+// by `setUserAuthenticationRequired(true)`. The contract is: given
+// `message` bytes, return the 64-byte Ed25519 signature; on failure,
+// the foreign implementation surfaces the error via its own
+// language-specific mechanism and the Rust side detects the bad
+// signature length and returns `MobileError::SignFailed`.
+callback interface FrameSigner {
+  bytes sign(bytes message);
 };

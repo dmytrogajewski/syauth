@@ -1,34 +1,22 @@
 //! Runtime configuration for `pam_sm_authenticate`.
 //!
-//! S-009 reads three knobs at module-entry time:
+//! S-008 reduces the configuration surface to two knobs:
 //!
 //! - [`Config::bond_dir`] — directory holding `bonds.toml` and `last.log`.
 //!   Defaults to [`DEFAULT_BOND_DIR`] (SPEC §4.4); overridable for tests via
-//!   the [`Config::with_bond_dir`] builder.
-//! - [`Config::auth_timeout`] — hard wall-clock budget for the
-//!   `connect → send → recv` roundtrip. Defaults to [`DEFAULT_AUTH_TIMEOUT`]
-//!   (SPEC §4.3 offline budget).
-//! - [`Config::mock_peer_enabled`] — whether `SYAUTH_TEST_MOCK=1` activates
-//!   the process-local [`crate::auth::MOCK_PEER`] slot. Gated behind a
-//!   compile-time flag so a release build *ignores* the env var.
+//!   the [`Config::with_bond_dir`] builder. PAM still needs to read
+//!   `bonds.toml` to pick the `peer_id` that goes on the wire (the daemon
+//!   owns the bond_key + pubkey).
+//! - [`Config::socket_path`] — the Unix-socket path PAM connects to.
+//!   Default `${XDG_RUNTIME_DIR}/syauth/auth.sock`; falls back to
+//!   `/run/user/$UID/syauth/auth.sock` when `XDG_RUNTIME_DIR` is unset
+//!   (SPEC §8 Risks row). Overridable via the libpam `socket=<path>`
+//!   argument so test harnesses can point at a mock daemon
+//!   (SPEC §3 scope item #12).
 //!
-//! ## Production-build env-var defense
-//!
-//! The DoD names a specific anti-foot-gun rule: `SYAUTH_TEST_MOCK=1` must
-//! NOT enable the mock in a real `libpam_syauth.so` shipped to users. We
-//! implement this with two gates `OR`-ed together:
-//!
-//! 1. `cfg!(test)` — true while building unit tests.
-//! 2. `cfg!(feature = "test-mock")` — opt-in via the `test-mock` Cargo
-//!    feature. The crate's own `[dev-dependencies]` re-import enables this
-//!    feature for `tests/pam_e2e.rs`. The release pipeline (`cargo build
-//!    --release --workspace`) does not enable the feature, so the env var
-//!    has no effect.
-//!
-//! [`Config::from_env_with_build_flags`] takes the two flags as parameters
-//! so the unit test in this module can pin the matrix directly. Callers in
-//! production go through [`Config::from_env`], which inlines the
-//! compile-time flags.
+//! The legacy S-009 `mock_peer_enabled`, `adapter_id`, and
+//! `response_timeout` knobs are gone — `pam_sm_authenticate` no longer
+//! drives BlueZ directly (SPEC §3 scope item #11).
 
 use std::{
     path::{Path, PathBuf},
@@ -41,135 +29,120 @@ use std::{
 /// real path.
 pub const DEFAULT_BOND_DIR: &str = "/var/lib/syauth";
 
-/// Default budget for the **peer-detection** half of the unlock —
-/// covers the BlueZ adapter handshake, scan, connect, and remote
-/// service discovery. SPEC §4.3 mandates that an offline-peer
-/// outcome arrive at libpam within **1.2 s**; DoD #2 measures
-/// against this constant. The recv-frame budget is independent (see
-/// [`DEFAULT_RESPONSE_TIMEOUT`]).
-pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_millis(1_200);
-
-/// Default budget for the **response** half — covers the human's
-/// reaction time after the desktop's challenge reaches the phone:
-/// approve-screen render, biometric prompt, sign + push. SPEC §4.3
-/// caps this at one user "comfortable wait" (one minute); a phone
-/// that does not respond within the budget is treated as
-/// `response-timeout` (PAM_AUTHINFO_UNAVAIL), so the configured
-/// fallback (typically pam_unix) runs.
-pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default budget for the daemon round-trip. Matches the daemon's
+/// own `DEFAULT_AUTH_TIMEOUT` (8000 ms) so the daemon's tokio
+/// `time::timeout` trips first; the PAM-side budget is a
+/// belt-and-suspenders fallback. 8000 ms accommodates real
+/// BiometricPrompt reaction time on the phone (~4-5s typical).
+pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_millis(8_000);
 
 /// Name of the file appended to under [`Config::bond_dir`] on every
-/// `authenticate` call. Read by `syauth status` in S-012.
+/// `authenticate` call.
 pub const LAST_LOG_FILENAME: &str = "last.log";
 
-/// Environment variable consulted by [`Config::from_env`]. Setting it to the
-/// literal value `1` enables the mock-peer path *only* when the
-/// `test-mock` Cargo feature is enabled (or the build is under `cargo test`).
-/// Documented at the type level for the operator's eye.
-pub const TEST_MOCK_ENV_VAR: &str = "SYAUTH_TEST_MOCK";
+/// Environment variable holding the per-user runtime directory. SPEC §8
+/// Risks row: "Fall back to `/run/user/$UID/syauth/auth.sock` if
+/// XDG_RUNTIME_DIR is unset".
+pub const XDG_RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
 
-/// The exact env-var value that turns the mock on. Anything else (`"0"`,
-/// `"yes"`, `""`, unset) is treated as off.
-pub const TEST_MOCK_ENV_ENABLED_VALUE: &str = "1";
+/// Per-user runtime-directory prefix used when [`XDG_RUNTIME_DIR_ENV`]
+/// is unset. The fallback path is
+/// `<DEFAULT_RUNTIME_FALLBACK_PREFIX><uid>/syauth/auth.sock`.
+pub const DEFAULT_RUNTIME_FALLBACK_PREFIX: &str = "/run/user/";
 
-/// Default BlueZ adapter id used by the production [`crate::auth::acquire_peer`]
-/// path to construct a [`syauth_transport::BlueZBtPeer`]. Matches the
-/// transport crate's `DEFAULT_ADAPTER_NAME`. Operators with a non-default
-/// adapter override via the `SYAUTH_ADAPTER` env var.
-pub const DEFAULT_ADAPTER_NAME: &str = "hci0";
+/// Subdirectory under the runtime dir that holds the daemon's socket.
+/// Matches `syauth_presenced::RUNTIME_SUBDIR`.
+pub const RUNTIME_SUBDIR: &str = "syauth";
 
-/// Env var honored by [`Config::from_env`] that overrides
-/// [`DEFAULT_ADAPTER_NAME`]. Useful on machines with multiple BT
-/// adapters or when running tests against a virtual adapter.
-pub const ADAPTER_ENV_VAR: &str = "SYAUTH_ADAPTER";
+/// Basename of the daemon's Unix socket. Matches
+/// `syauth_presenced::DEFAULT_SOCKET_BASENAME`.
+pub const DEFAULT_SOCKET_BASENAME: &str = "auth.sock";
+
+/// Prefix the PAM module recognises in its `argv` for the
+/// `socket=<path>` argument (SPEC §3 scope item #12). Anchored as a
+/// constant so the parser and the unit test grep the same literal.
+pub const PAM_SOCKET_ARG_PREFIX: &str = "socket=";
 
 /// Runtime configuration consumed by [`crate::auth::authenticate`].
 ///
-/// Construct via [`Config::from_env`] in production code, [`Config::for_tests`]
-/// in tests, or the builder pattern (`Config::default().with_bond_dir(...)`).
+/// Construct via [`Config::from_pam_argv`] in production code,
+/// [`Config::for_tests`] in tests, or the builder pattern
+/// (`Config::default().with_bond_dir(...)`).
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory holding `bonds.toml` and `last.log`.
     pub bond_dir: PathBuf,
-    /// Peer-detection budget. Caps the time spent on BlueZ adapter
-    /// open, scan, connect, and remote service discovery. SPEC §4.3
-    /// pins this to [`DEFAULT_AUTH_TIMEOUT`] (1.2 s) so an absent
-    /// phone returns `offline` within libpam's "no-phone, fall back
-    /// to password" budget. The recv-frame budget is independent.
+    /// Path to the daemon's Unix-domain socket. Defaults to
+    /// `${XDG_RUNTIME_DIR}/syauth/auth.sock`; overridden by the libpam
+    /// `socket=<path>` argument (SPEC §3 scope item #12).
+    pub socket_path: PathBuf,
+    /// Daemon round-trip budget. Caps the time PAM spends waiting for
+    /// the daemon to write back `Response::Challenge`. SPEC §4.3.
     pub auth_timeout: Duration,
-    /// User-approval budget. Caps the time we wait for the phone's
-    /// signed-response frame after the desktop's challenge lands —
-    /// covers Approve UI render, biometric prompt, signature, and
-    /// notify push. [`DEFAULT_RESPONSE_TIMEOUT`] (60 s) is the SPEC
-    /// §4.3 "comfortable user wait" cap.
-    pub response_timeout: Duration,
-    /// Whether the mock-peer injection slot is honored. Computed from the
-    /// env var AND the compile-time flags by [`Config::from_env`].
-    pub mock_peer_enabled: bool,
-    /// BlueZ adapter id (e.g. "hci0") passed to
-    /// [`syauth_transport::BlueZBtPeer::new`]. Defaults to
-    /// [`DEFAULT_ADAPTER_NAME`]; overridden via [`ADAPTER_ENV_VAR`] in
-    /// [`Config::from_env`].
-    pub adapter_id: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
+            socket_path: Self::resolve_socket_path(None),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
-            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
-            mock_peer_enabled: false,
-            adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
     }
 }
 
 impl Config {
-    /// Load the config from the process environment using the compile-time
-    /// build flags of this crate.
-    ///
-    /// Calls [`Config::from_env_with_build_flags`] with `cfg!(test)` and
-    /// `cfg!(feature = "test-mock")`. In any release build with the
-    /// `test-mock` feature off, `mock_peer_enabled` is always `false`
-    /// regardless of `SYAUTH_TEST_MOCK`.
+    /// Parse the libpam `argv` for the documented arguments (currently
+    /// only `socket=<path>`) and assemble a `Config`. Unknown
+    /// arguments are silently ignored — libpam stacks frequently
+    /// carry arguments destined for other modules and rejecting them
+    /// would break composition.
     #[must_use]
-    pub fn from_env() -> Self {
-        Self::from_env_with_build_flags(cfg!(test), cfg!(feature = "test-mock"))
-    }
-
-    /// Same as [`Config::from_env`] but takes the build-time flags as
-    /// parameters so the unit test in this module can pin the
-    /// production-build matrix without macro contortions.
-    #[must_use]
-    pub fn from_env_with_build_flags(under_cargo_test: bool, test_mock_feature: bool) -> Self {
-        let env_says_on = std::env::var(TEST_MOCK_ENV_VAR)
-            .map(|v| v == TEST_MOCK_ENV_ENABLED_VALUE)
-            .unwrap_or(false);
-        let allowed_by_build = under_cargo_test || test_mock_feature;
-        let adapter_id = std::env::var(ADAPTER_ENV_VAR).unwrap_or_else(|_| DEFAULT_ADAPTER_NAME.to_owned());
+    pub fn from_pam_argv(argv: &[&str]) -> Self {
+        let socket_override = argv
+            .iter()
+            .find_map(|arg| arg.strip_prefix(PAM_SOCKET_ARG_PREFIX))
+            .map(PathBuf::from);
         Self {
             bond_dir: PathBuf::from(DEFAULT_BOND_DIR),
+            socket_path: Self::resolve_socket_path(socket_override),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
-            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
-            mock_peer_enabled: env_says_on && allowed_by_build,
-            adapter_id,
         }
     }
 
-    /// Build a `Config` suitable for tests: tempdir bond dir, mock enabled,
-    /// default timeout.
+    /// Resolve the daemon's Unix-socket path. Precedence:
     ///
-    /// `auth_timeout` is left at the production default so the offline-path
-    /// budget assertion in TC-02 measures something meaningful.
+    /// 1. `override_path` (the libpam `socket=<path>` argument).
+    /// 2. `${XDG_RUNTIME_DIR}/syauth/auth.sock`.
+    /// 3. `/run/user/<euid>/syauth/auth.sock` (SPEC §8 Risks fallback).
+    #[must_use]
+    pub fn resolve_socket_path(override_path: Option<PathBuf>) -> PathBuf {
+        if let Some(p) = override_path {
+            return p;
+        }
+        if let Ok(dir) = std::env::var(XDG_RUNTIME_DIR_ENV)
+            && !dir.is_empty()
+        {
+            return PathBuf::from(dir).join(RUNTIME_SUBDIR).join(DEFAULT_SOCKET_BASENAME);
+        }
+        // `geteuid(2)` cannot fail and `nix::unistd::geteuid` is a
+        // safe wrapper. Avoiding `libc::geteuid` keeps the workspace
+        // lint `unsafe_code = "deny"` happy (the PAM crate opts in at
+        // the crate level but we still prefer typed wrappers).
+        let uid = nix::unistd::geteuid().as_raw();
+        PathBuf::from(format!("{DEFAULT_RUNTIME_FALLBACK_PREFIX}{uid}"))
+            .join(RUNTIME_SUBDIR)
+            .join(DEFAULT_SOCKET_BASENAME)
+    }
+
+    /// Build a `Config` suitable for tests: tempdir bond dir, default
+    /// timeout, and a tempdir-local socket path the caller fills in.
     #[must_use]
     pub fn for_tests(bond_dir: &Path) -> Self {
         Self {
             bond_dir: bond_dir.to_path_buf(),
+            socket_path: bond_dir.join(DEFAULT_SOCKET_BASENAME),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
-            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
-            mock_peer_enabled: true,
-            adapter_id: DEFAULT_ADAPTER_NAME.to_owned(),
         }
     }
 
@@ -180,8 +153,16 @@ impl Config {
         self
     }
 
-    /// Builder: override the auth timeout. Tests use this for the panic-
-    /// boundary scenario (TC-09 short budget).
+    /// Builder: override the socket path.
+    #[must_use]
+    pub fn with_socket_path(mut self, socket_path: PathBuf) -> Self {
+        self.socket_path = socket_path;
+        self
+    }
+
+    /// Builder: override the auth timeout. Tests use this for the
+    /// daemon-down-latency assertion (TC-01) and the panic-boundary
+    /// scenario (legacy TC-09).
     #[must_use]
     pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
         self.auth_timeout = timeout;
@@ -204,71 +185,42 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    // Journey: specs/journeys/JOURNEY-S-009-pam-mock-e2e.md TC-11.
-
-    use std::sync::Mutex;
+    // Journey: specs/journeys/JOURNEY-S-008-pam-unix-socket-client.md
 
     use super::*;
 
-    /// Serialize every test that touches the process-wide env var. Rust 2024
-    /// marks `set_var`/`remove_var` as `unsafe` because they race with
-    /// concurrent `getenv` readers; the unit tests below mutate the same
-    /// key, so we must funnel them through one mutex regardless of
-    /// `cargo test`'s thread fanout.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// TC-11: in a release build with `test-mock` feature *off*, the env var
-    /// MUST be ignored. This is the documented anti-foot-gun guarantee from
-    /// DoD #5.
+    /// TC-12: the PAM module's argv parser picks up `socket=<path>`.
     #[test]
-    fn production_build_ignores_test_mock_env_var() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // We pass the matrix directly so `cfg!(test)` (always true in this
-        // unit test) doesn't accidentally make the assertion vacuous.
-        // SAFETY: env-var set/unset is unsafe in 2024 edition for cross-
-        // thread reasons; this unit test is single-threaded under ENV_LOCK
-        // and the restoration in the guard ensures no leakage to sibling
-        // tests.
-        let _guard = TestEnvGuard::set(TEST_MOCK_ENV_VAR, TEST_MOCK_ENV_ENABLED_VALUE);
-        let cfg = Config::from_env_with_build_flags(false, false);
+    fn pam_sm_authenticate_parses_socket_argument() {
+        let argv = ["socket=/tmp/x.sock"];
+        let cfg = Config::from_pam_argv(&argv);
+        assert_eq!(cfg.socket_path, PathBuf::from("/tmp/x.sock"));
+    }
+
+    /// Unknown arguments are ignored, leaving the default socket path.
+    #[test]
+    fn from_pam_argv_ignores_unknown_arguments() {
+        let argv = ["nullok", "use_first_pass"];
+        let cfg = Config::from_pam_argv(&argv);
+        // The default resolves either to XDG_RUNTIME_DIR or the
+        // /run/user/<uid> fallback; both end in `syauth/auth.sock`.
+        let resolved = cfg.socket_path.to_string_lossy();
         assert!(
-            !cfg.mock_peer_enabled,
-            "release build (no test-mock feature, not under cargo test) MUST ignore SYAUTH_TEST_MOCK; got mock_peer_enabled=true"
+            resolved.ends_with("syauth/auth.sock"),
+            "default socket path should end in syauth/auth.sock; got {resolved}"
         );
     }
 
-    /// A build with the `test-mock` feature on AND the env var set MUST
-    /// honor the env var. This is the path the integration tests in
-    /// `tests/pam_e2e.rs` rely on.
-    #[test]
-    fn test_mock_feature_with_env_set_enables_mock() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = TestEnvGuard::set(TEST_MOCK_ENV_VAR, TEST_MOCK_ENV_ENABLED_VALUE);
-        let cfg = Config::from_env_with_build_flags(false, true);
-        assert!(cfg.mock_peer_enabled, "test-mock feature + env=1 must enable the mock");
-    }
-
-    /// A build with `test-mock` on but the env var unset MUST leave the
-    /// mock off — opting in to the feature alone is not enough.
-    #[test]
-    fn test_mock_feature_without_env_keeps_mock_off() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = TestEnvGuard::unset(TEST_MOCK_ENV_VAR);
-        let cfg = Config::from_env_with_build_flags(false, true);
-        assert!(!cfg.mock_peer_enabled, "test-mock feature without env=1 must leave mock off");
-    }
-
-    /// Sanity: default timeout matches the spec budget (SPEC §4.3).
+    /// Sanity: default timeout matches the SPEC §4.3 budget.
     #[test]
     fn default_auth_timeout_matches_spec_offline_budget() {
-        assert_eq!(DEFAULT_AUTH_TIMEOUT, Duration::from_millis(1_200));
+        assert_eq!(DEFAULT_AUTH_TIMEOUT, Duration::from_millis(8_000));
     }
 
-    /// Sanity: default bond dir is the SPEC §4.4 path.
+    /// Sanity: default bond dir matches SPEC §4.4.
     #[test]
     fn default_bond_dir_matches_spec() {
         assert_eq!(DEFAULT_BOND_DIR, "/var/lib/syauth");
-        assert_eq!(Config::default().bond_dir, PathBuf::from("/var/lib/syauth"));
     }
 
     /// `for_tests` produces a usable config bound to a tempdir.
@@ -277,58 +229,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = Config::for_tests(tmp.path());
         assert_eq!(cfg.bond_dir, tmp.path());
-        assert!(cfg.mock_peer_enabled);
+        assert_eq!(cfg.socket_path, tmp.path().join(DEFAULT_SOCKET_BASENAME));
         assert_eq!(cfg.last_log_path(), tmp.path().join(LAST_LOG_FILENAME));
     }
 
-    /// Process-wide env-var guard that restores the prior state on drop.
-    ///
-    /// Rust 2024 marks `std::env::set_var` / `remove_var` as `unsafe` because
-    /// they mutate global state without synchronization with concurrent
-    /// readers (notably `libc::getenv`). The PAM module never calls these in
-    /// production; the guard exists ONLY for these unit tests, which run
-    /// single-threaded with `cargo test` by default for `--test-threads`
-    /// the same value as core count — sibling tests in this module are
-    /// not concurrent because they all share this fixture.
-    struct TestEnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-    impl TestEnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: single-threaded test, no concurrent getenv readers in
-            // this crate's test binary. Restored on drop.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-        fn unset(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: same as `set`.
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, previous }
-        }
-    }
-    impl Drop for TestEnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => {
-                    // SAFETY: same as `set`.
-                    unsafe {
-                        std::env::set_var(self.key, v);
-                    }
-                }
-                None => {
-                    // SAFETY: same as `set`.
-                    unsafe {
-                        std::env::remove_var(self.key);
-                    }
-                }
-            }
-        }
+    /// `with_socket_path` plumbs the override through to the field.
+    #[test]
+    fn with_socket_path_sets_field() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::for_tests(tmp.path()).with_socket_path(PathBuf::from("/tmp/other.sock"));
+        assert_eq!(cfg.socket_path, PathBuf::from("/tmp/other.sock"));
     }
 }

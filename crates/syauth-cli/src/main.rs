@@ -16,17 +16,20 @@ use std::{
 };
 
 use anyhow::Result;
-use async_trait::async_trait;
 use clap::{Parser, Subcommand};
+use rand::{RngCore, rngs::OsRng};
 use syauth_cli::{
+    doctor::{DoctorOpts, run_doctor},
     install_pam::{self, InstallOpts, InstallOutcome},
+    install_presenced::{self, InstallPresencedOpts, InstallPresencedOutcome},
     list::run_list,
-    pair::{AdapterInfo, LescOutcome, ListOpts, PairBackend, PairCandidate, PairError, PairOpts, PairingPhase, run_pair},
-    provision::{PROVISION_SUCCESS_BANNER, ProvisionOpts, run_provision_test},
+    pair::{ListOpts, PairOpts, PairingPhase, run_pair},
+    pair_backend::{BluerPairBackend, make_auto_accept_confirm_handler, make_stdio_confirm_handler, make_waybar_confirm_handler},
     revoke::{RevokeOpts, run_revoke},
     status::{StatusOpts, run_status},
     uninstall_pam::{self, UninstallOpts, UninstallOutcome},
 };
+use syauth_core::SigningKey;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,11 +63,16 @@ enum Cmd {
     InstallPam(InstallOpts),
     /// Restore a PAM service file from its `.bak` and remove the bak.
     UninstallPam(UninstallOpts),
-    /// Generate a pre-seeded test bond + emit the provision package the
-    /// phone consumes via `adb push`. Bridges the still-stubbed LESC
-    /// flow so the end-to-end unlock path can be demonstrated on real
-    /// hardware in v0.1.
-    ProvisionTest(ProvisionOpts),
+    /// Install the `syauth-presenced` systemd user unit and (live mode)
+    /// reload + enable + start it.
+    InstallPresenced(InstallPresencedOpts),
+    /// Inspect the unlock chain: daemon liveness, bonds file, keys file
+    /// modes, BlueZ adapter, systemd user unit state, audit-log tail,
+    /// and the `XDG_RUNTIME_DIR` SSH-session caveat. Emits one
+    /// greppable `key=value` line per probe plus a final
+    /// `doctor=ok|warn|fail` summary. `--json` emits the same data as
+    /// a typed JSON object for tooling.
+    Doctor(DoctorOpts),
 }
 
 fn main() -> ExitCode {
@@ -101,21 +109,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Status(opts) => run_status_cli(&opts).await,
         Cmd::InstallPam(opts) => run_install(&opts),
         Cmd::UninstallPam(opts) => run_uninstall(&opts),
-        Cmd::ProvisionTest(opts) => run_provision_cli(&opts),
+        Cmd::InstallPresenced(opts) => run_install_presenced(&opts),
+        Cmd::Doctor(opts) => run_doctor_cli(&opts),
     }
 }
 
-fn run_provision_cli(opts: &ProvisionOpts) -> Result<()> {
-    let outcome = run_provision_test(opts)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{PROVISION_SUCCESS_BANNER}")?;
-    writeln!(stdout, "    peer_id:      {}", outcome.peer_id)?;
-    writeln!(stdout, "    bond record:  {}", outcome.bond_path.display())?;
-    writeln!(stdout, "    bond key:     {}", outcome.bond_key_path.display())?;
-    writeln!(stdout, "    provision:    {}", outcome.provision_path.display())?;
-    writeln!(stdout)?;
-    writeln!(stdout, "Next: adb push {} /sdcard/Download/", outcome.provision_path.display())?;
-    Ok(())
+fn run_doctor_cli(opts: &DoctorOpts) -> Result<()> {
+    run_doctor(opts).map_err(Into::into)
 }
 
 fn run_revoke_cli(opts: &RevokeOpts) -> Result<()> {
@@ -127,7 +127,25 @@ async fn run_status_cli(opts: &StatusOpts) -> Result<()> {
 }
 
 async fn run_pair_cli(opts: &PairOpts) -> Result<()> {
-    let backend = BluerPairBackend::new(&opts.adapter);
+    // Fresh per-invocation host signing key. The pubkey crosses the wire
+    // over the LESC-bonded pair-service; the private key never leaves
+    // this process and is dropped when the function returns.
+    let mut seed = [0u8; SIGNING_KEY_SEED_LEN];
+    OsRng.fill_bytes(&mut seed);
+    let signing_key = SigningKey::from_bytes(&seed);
+    let backend = BluerPairBackend::new(&opts.adapter, &signing_key);
+    // `--yes` auto-accepts the 6-digit OS-level numeric-comparison
+    // code; `--waybar` surfaces it on the bar via the sy applet;
+    // otherwise stdin drives the y/N prompt. The operator-confirmed
+    // app-OOB code remains the independent gate regardless of which
+    // numeric-comparison handler is selected.
+    if opts.yes {
+        backend.install_confirm_handler(make_auto_accept_confirm_handler());
+    } else if opts.waybar {
+        backend.install_confirm_handler(make_waybar_confirm_handler());
+    } else {
+        backend.install_confirm_handler(make_stdio_confirm_handler());
+    }
     let phase = run_pair(opts, &backend).await?;
     let mut stdout = io::stdout().lock();
     match phase {
@@ -139,44 +157,12 @@ async fn run_pair_cli(opts: &PairOpts) -> Result<()> {
     }
 }
 
+/// Ed25519 seed length (32 bytes). Named so we never sprinkle the literal
+/// 32 across crypto call sites.
+const SIGNING_KEY_SEED_LEN: usize = 32;
+
 fn run_list_cli(opts: &ListOpts) -> Result<()> {
     run_list(opts).map_err(Into::into)
-}
-
-/// Production [`PairBackend`] wrapping `bluer`. v0.1 surfaces every call as a
-/// typed `PairError::Backend` so the binary compiles and links the dependency,
-/// but the actual radio path lands with S-019 ("Full e2e on real radios"). The
-/// integration test always injects a `MockPairBackend`; no production caller
-/// reaches this until S-019.
-struct BluerPairBackend {
-    adapter_id: String,
-}
-
-impl BluerPairBackend {
-    fn new(adapter_id: &str) -> Self {
-        Self {
-            adapter_id: adapter_id.to_owned(),
-        }
-    }
-}
-
-#[async_trait]
-impl PairBackend for BluerPairBackend {
-    async fn adapter_info(&self, _adapter_id: &str) -> Result<AdapterInfo, PairError> {
-        Err(PairError::Backend {
-            reason: format!("BluerPairBackend for '{}' real-radio path lands in S-019", self.adapter_id),
-        })
-    }
-    async fn scan_peers(&self) -> Result<Vec<PairCandidate>, PairError> {
-        Err(PairError::Backend {
-            reason: "BluerPairBackend::scan_peers real-radio path lands in S-019".to_owned(),
-        })
-    }
-    async fn initiate_lesc_with_peer(&self, _peer: &PairCandidate) -> Result<LescOutcome, PairError> {
-        Err(PairError::Backend {
-            reason: "BluerPairBackend::initiate_lesc_with_peer real-radio path lands in S-019".to_owned(),
-        })
-    }
 }
 
 fn run_install(opts: &InstallOpts) -> Result<()> {
@@ -192,6 +178,44 @@ fn run_install(opts: &InstallOpts) -> Result<()> {
                 "wrote backup to {}; inserted syauth at top of auth block in {}",
                 backup.display(),
                 service.display()
+            )?;
+        }
+    }
+    if opts.with_presenced {
+        let presenced_opts = InstallPresencedOpts {
+            from: opts.presenced_from.clone(),
+            unit_dir: opts.presenced_unit_dir.clone(),
+            dry_run: opts.presenced_dry_run,
+        };
+        let presenced_outcome = install_presenced::install_presenced(&presenced_opts, &mut stdout)?;
+        report_install_presenced(&mut stdout, &presenced_outcome)?;
+    }
+    Ok(())
+}
+
+fn run_install_presenced(opts: &InstallPresencedOpts) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    let outcome = install_presenced::install_presenced(opts, &mut stdout)?;
+    report_install_presenced(&mut stdout, &outcome)?;
+    Ok(())
+}
+
+fn report_install_presenced(stdout: &mut io::StdoutLock<'_>, outcome: &InstallPresencedOutcome) -> Result<()> {
+    match outcome {
+        InstallPresencedOutcome::Installed { unit_path, binary_path } => {
+            writeln!(
+                stdout,
+                "installed syauth-presenced: wrote unit {}, copied binary to {}",
+                unit_path.display(),
+                binary_path.display()
+            )?;
+        }
+        InstallPresencedOutcome::DryRun { unit_path, source_binary } => {
+            writeln!(
+                stdout,
+                "dry-run: wrote unit {} pointing at {}",
+                unit_path.display(),
+                source_binary.display()
             )?;
         }
     }

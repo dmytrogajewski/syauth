@@ -118,6 +118,49 @@ narrate the size of the remaining backlog.
 When pacing or context truly matters, the user raises it. Until then,
 shut up about clocks and budgets.
 
+### No actions based on guessing (Non-Negotiable)
+
+Every code edit, every claimed root cause, every closure of a `DEV-NNN`
+or roadmap item must rest on **evidence** — a log line, a captured trace,
+a mechanical probe output, a test that passes only when the claimed
+behaviour holds. Plausibility is not evidence.
+
+If you are about to:
+
+- change code "because it might be X",
+- claim a bug is fixed "because the fix should work",
+- close a row "because the closure conditions look met",
+- spawn a subagent off a hypothesis you have not verified,
+
+stop. Gather the evidence first.
+
+Forbidden forms of "evidence":
+
+- "this is most likely…" / "this is probably…" / "I think the issue
+  is…" — these are guesses. Convert them to a probe that returns yes or
+  no, run the probe, paste the output.
+- "the code looks correct" — looking is not evidence; running is.
+- "the unit tests pass" — unit tests prove the unit's contract, not
+  the integrated behaviour. For runtime-contract bugs (radio, IPC,
+  PAM, FFI boundary), unit tests are necessary but not sufficient.
+- "the symptom matches scenario X" — symptom-matching narrows the
+  search, it does not prove the cause. Reproduce the cause directly.
+
+How to act on this rule:
+
+- When you have a hypothesis, write down what observation would
+  falsify it. Then run the observation. Then act on the result.
+- If you do not have access to the diagnostic the case requires, say
+  so explicitly and ask the user to run it (or to authorize you to
+  do so). Do not substitute a plausible-sounding code change.
+- A subagent prompt that says "the issue is probably X, fix it" is a
+  scope-discipline violation. Subagent prompts must hand the agent the
+  evidence trail, not a guess.
+
+The orchestrator's own closure probes (mechanical greps, `make` gates)
+are evidence. The orchestrator's narrative "I think this is the bug"
+is not.
+
 ### Pre-commit grep (mechanical)
 
 Before any commit that touches `crates/`, `syauth-android/app/src/main/`,

@@ -310,51 +310,83 @@ pub fn sign_challenge_response(signing_key: Vec<u8>, frame_bytes: Vec<u8>) -> Re
 }
 
 // ---------------------------------------------------------------------------
-// 3b. build_response_frame
+// 3b. FrameSigner — UniFFI callback interface; the production signer is
+//     a Kotlin `KeystoreFrameSigner` that opens a `Signature.getInstance(
+//     "Ed25519")` initialised against an Android Keystore Ed25519
+//     `PrivateKey`. The Rust side NEVER sees the private key bytes —
+//     that closes DEV-002 per SPEC §3.2 D6.
+// ---------------------------------------------------------------------------
+
+/// Synchronous Ed25519-sign-over-bytes upcall, implemented on the
+/// foreign side (the JVM) and invoked by [`build_response_frame`].
+///
+/// The contract is: given `message` bytes, return the 64-byte
+/// Ed25519 signature produced by the phone's identity key. The
+/// foreign implementation is responsible for gating the call on
+/// `setUserAuthenticationRequired(true)`; the Rust side trusts the
+/// returned bytes and only checks the length.
+///
+/// Marshalled to Kotlin/Swift via the UDL `callback interface
+/// FrameSigner` declaration in `src/mobile.udl`.
+pub trait FrameSigner: Send + Sync {
+    /// Sign [`message`] and return the 64-byte Ed25519 signature.
+    fn sign(&self, message: Vec<u8>) -> Vec<u8>;
+}
+
+// ---------------------------------------------------------------------------
+// 3c. build_response_frame
 // ---------------------------------------------------------------------------
 
 /// Build the encoded wire-format response frame the desktop's
-/// `pam_syauth` expects. Wraps the Ed25519 signature over the challenge
-/// in a frame whose payload is `signature || empty` and whose body is
-/// MAC-tagged under `bond_key`.
+/// `pam_syauth` expects. Wraps the Ed25519 signature over the
+/// challenge in a frame whose payload is `signature || empty` and
+/// whose body is MAC-tagged under `bond_key`.
 ///
 /// Inputs:
 /// * `bond_key` — 32-byte shared secret used for the MAC tag.
-/// * `signing_key` — 32-byte Ed25519 secret seed; the phone's identity.
+/// * `signer` — foreign-implemented [`FrameSigner`]. The Rust side
+///   calls `signer.sign(unsigned_body)` to get the 64-byte Ed25519
+///   signature; the private key bytes never appear in this crate.
 /// * `challenge_frame_bytes` — full wire-format challenge frame the
 ///   desktop just wrote to the challenge characteristic.
 ///
-/// Returns the encoded response-frame bytes the phone writes back on
-/// the response characteristic.
+/// Returns the encoded response-frame bytes the phone writes back
+/// on the response characteristic.
 ///
 /// # Errors
 ///
-/// - [`MobileError::InvalidKey`] on a wrong-length `bond_key` /
-///   `signing_key`.
+/// - [`MobileError::InvalidKey`] on a wrong-length `bond_key`.
 /// - [`MobileError::BadFrame`] if `Frame::decode` rejects
 ///   `challenge_frame_bytes`.
-/// - [`MobileError::SignFailed`] on any signature failure.
-pub fn build_response_frame(bond_key: Vec<u8>, signing_key: Vec<u8>, challenge_frame_bytes: Vec<u8>) -> Result<Vec<u8>, MobileError> {
+/// - [`MobileError::SignFailed`] if the signer returns a blob whose
+///   length is not exactly [`ED25519_SIGNATURE_LEN`] bytes, or if
+///   the response frame encode fails.
+pub fn build_response_frame(
+    bond_key: Vec<u8>,
+    signer: Box<dyn FrameSigner>,
+    challenge_frame_bytes: Vec<u8>,
+) -> Result<Vec<u8>, MobileError> {
     let bond_key_arr = bond_key_array(&bond_key)?;
-    if signing_key.len() != ED25519_SECRET_KEY_LEN {
-        return Err(MobileError::InvalidKey {
-            reason: format!("signing_key must be {ED25519_SECRET_KEY_LEN} bytes, got {}", signing_key.len()),
-        });
-    }
-    let mut seed = [0u8; ED25519_SECRET_KEY_LEN];
-    seed.copy_from_slice(&signing_key);
-    let sk = SigningKey::from_bytes(&seed);
     let challenge = Frame::decode(&challenge_frame_bytes).map_err(|e| MobileError::BadFrame {
         reason: format!("challenge decode failed: {e}"),
     })?;
-    let sig = sign_frame(&sk, &challenge).map_err(|e| MobileError::SignFailed {
-        reason: format!("ed25519 sign failed: {e}"),
+    let unsigned_body = challenge.body_bytes().map_err(|e| MobileError::BadFrame {
+        reason: format!("challenge body encode failed: {e}"),
     })?;
+    let sig_bytes = signer.sign(unsigned_body);
+    if sig_bytes.len() != ED25519_SIGNATURE_LEN {
+        return Err(MobileError::SignFailed {
+            reason: format!(
+                "foreign signer returned {} bytes, expected {ED25519_SIGNATURE_LEN}",
+                sig_bytes.len()
+            ),
+        });
+    }
 
     let mut response_nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut response_nonce);
     let mut payload: Vec<u8> = Vec::with_capacity(ED25519_SIGNATURE_LEN);
-    payload.extend_from_slice(&sig.to_bytes());
+    payload.extend_from_slice(&sig_bytes);
 
     let mut body: Vec<u8> = Vec::with_capacity(1 + NONCE_LEN + payload.len());
     body.push(SYAUTH_WIRE_VERSION_V1);
@@ -415,6 +447,47 @@ pub fn oob_code_for_bond(bond_key: Vec<u8>) -> Result<Vec<String>, MobileError> 
         OOB_WORDS[out[2] as usize].to_owned(),
         OOB_WORDS[out[3] as usize].to_owned(),
     ])
+}
+
+// ---------------------------------------------------------------------------
+// 5. session_uuid_for_bond
+// ---------------------------------------------------------------------------
+
+/// HKDF info string for the rotating session UUID derivation. Mirrors
+/// `syauth_transport::HKDF_INFO_SESSION_V1` byte-for-byte; pinned by
+/// the in-crate `session_uuid_byte_identical_to_transport_fixture`
+/// test below.
+pub const HKDF_INFO_SESSION_V1: &[u8] = b"syauth-session-v1";
+
+/// Length in bytes of the derived rotating session UUID. Matches
+/// `syauth_transport::SESSION_UUID_BYTES` (the standard 128-bit UUID
+/// width).
+pub const SESSION_UUID_BYTES_MOBILE: usize = 16;
+
+/// Derive the 16-byte rotating session UUID the desktop advertises
+/// for `bond_key` at wall-clock `minute`.
+///
+/// `minute` is the floor of unix-epoch seconds by 60; the phone
+/// computes it from the OS clock and passes it in so this function
+/// is pure (deterministic for a given input, no `Instant::now()`
+/// inside). Mirrors `syauth_transport::session_uuid_for` byte-for-
+/// byte — DEV-003 closure depends on the desktop's advertised UUID
+/// and the phone's scan filter UUID set agreeing.
+///
+/// # Errors
+///
+/// - [`MobileError::InvalidKey`] if `bond_key.len() != MOBILE_BOND_KEY_LEN`.
+pub fn session_uuid_for_bond(bond_key: Vec<u8>, minute: i64) -> Result<Vec<u8>, MobileError> {
+    let bond_key_arr = bond_key_array(&bond_key)?;
+    let hk = Hkdf::<Sha256>::new(None, &bond_key_arr);
+    let mut info = Vec::with_capacity(HKDF_INFO_SESSION_V1.len() + core::mem::size_of::<i64>());
+    info.extend_from_slice(HKDF_INFO_SESSION_V1);
+    info.extend_from_slice(&minute.to_be_bytes());
+    let mut out = [0u8; SESSION_UUID_BYTES_MOBILE];
+    hk.expand(&info, &mut out).map_err(|_| MobileError::InvalidKey {
+        reason: "hkdf expand failed (unreachable in production)".to_owned(),
+    })?;
+    Ok(out.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +983,114 @@ mod tests {
         assert!(matches!(err, MobileError::BadFrame { .. }));
     }
 
+    // ----- build_response_frame (DEV-002 FrameSigner callback) -----
+
+    /// Test-double [`FrameSigner`] that records the bytes it was asked
+    /// to sign (via an [`Arc<Mutex>`]) and returns a caller-supplied
+    /// signature blob. The capture handle is held outside the `Box`
+    /// passed to UniFFI's `build_response_frame` so tests can both
+    /// move the signer into the function AND observe the captured
+    /// message bytes afterwards.
+    struct CapturingSigner {
+        captured: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+        canned: Vec<u8>,
+    }
+
+    impl FrameSigner for CapturingSigner {
+        fn sign(&self, message: Vec<u8>) -> Vec<u8> {
+            let mut slot = self.captured.lock().expect("capturing-signer mutex");
+            *slot = Some(message);
+            self.canned.clone()
+        }
+    }
+
+    /// Shared handle the [`CapturingSigner`] writes the captured
+    /// message into.
+    type CapturedSlot = std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>;
+
+    fn new_capturing_signer(canned: Vec<u8>) -> (Box<dyn FrameSigner>, CapturedSlot) {
+        let captured: CapturedSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let signer: Box<dyn FrameSigner> = Box::new(CapturingSigner {
+            captured: std::sync::Arc::clone(&captured),
+            canned,
+        });
+        (signer, captured)
+    }
+
+    #[test]
+    fn build_response_frame_calls_signer_with_unsigned_body() {
+        let canned = vec![0u8; ED25519_SIGNATURE_LEN];
+        let (signer, captured) = new_capturing_signer(canned);
+        let (challenge_wire, _payload) = build_tagged_frame(&FIXTURE_BOND_KEY, vec![0x55u8; 4]);
+        let _ = build_response_frame(FIXTURE_BOND_KEY.to_vec(), signer, challenge_wire.clone()).expect("build ok");
+        let captured_bytes = captured.lock().expect("mutex").clone().expect("signer was called");
+        let challenge = Frame::decode(&challenge_wire).expect("decode");
+        let expected_body = challenge.body_bytes().expect("body");
+        assert_eq!(captured_bytes, expected_body);
+    }
+
+    #[test]
+    fn build_response_frame_embeds_signer_output_as_payload_prefix() {
+        let canned: Vec<u8> = (0..ED25519_SIGNATURE_LEN).map(|i| (i as u8) ^ 0xAA).collect();
+        let (signer, _captured) = new_capturing_signer(canned.clone());
+        let (challenge_wire, _payload) = build_tagged_frame(&FIXTURE_BOND_KEY, vec![0xCCu8; 8]);
+        let response_wire = build_response_frame(FIXTURE_BOND_KEY.to_vec(), signer, challenge_wire).expect("build ok");
+        let response = Frame::decode(&response_wire).expect("decode response");
+        assert_eq!(response.payload, canned);
+    }
+
+    #[test]
+    fn build_response_frame_rejects_wrong_length_signature() {
+        let (signer, _captured) = new_capturing_signer(vec![0u8; ED25519_SIGNATURE_LEN - 1]);
+        let (challenge_wire, _payload) = build_tagged_frame(&FIXTURE_BOND_KEY, vec![0xBBu8; 4]);
+        let err = build_response_frame(FIXTURE_BOND_KEY.to_vec(), signer, challenge_wire).expect_err("short sig rejected");
+        match err {
+            MobileError::SignFailed { reason } => {
+                assert!(reason.contains(&ED25519_SIGNATURE_LEN.to_string()));
+                for ch in reason.chars() {
+                    assert!(ch.is_ascii_graphic() || ch == ' ', "non-ascii char in error: {ch:?}");
+                }
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_response_frame_rejects_bad_bond_key_length() {
+        let (signer, _captured) = new_capturing_signer(vec![0u8; ED25519_SIGNATURE_LEN]);
+        let (challenge_wire, _payload) = build_tagged_frame(&FIXTURE_BOND_KEY, vec![0xAAu8; 4]);
+        let short_key = vec![0u8; MOBILE_BOND_KEY_LEN - 1];
+        let err = build_response_frame(short_key, signer, challenge_wire).expect_err("short key rejected");
+        match err {
+            MobileError::InvalidKey { reason } => assert!(reason.contains(&MOBILE_BOND_KEY_LEN.to_string())),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_response_frame_rejects_bad_challenge_bytes() {
+        let (signer, _captured) = new_capturing_signer(vec![0u8; ED25519_SIGNATURE_LEN]);
+        let garbage = vec![0u8; 4];
+        let err = build_response_frame(FIXTURE_BOND_KEY.to_vec(), signer, garbage).expect_err("short frame rejected");
+        assert!(matches!(err, MobileError::BadFrame { .. }));
+    }
+
+    #[test]
+    fn build_response_frame_response_tag_verifies_under_bond_key() {
+        let sk = SigningKey::from_bytes(&FIXTURE_SIGNING_KEY);
+        let (challenge_wire, _payload) = build_tagged_frame(&FIXTURE_BOND_KEY, vec![0xEEu8; 4]);
+        let challenge = Frame::decode(&challenge_wire).expect("decode");
+        let real_sig = sign_frame(&sk, &challenge).expect("sign");
+        let real_canned = real_sig.to_bytes().to_vec();
+        let (signer, _captured) = new_capturing_signer(real_canned);
+        let response_wire = build_response_frame(FIXTURE_BOND_KEY.to_vec(), signer, challenge_wire).expect("build ok");
+        let response = Frame::decode(&response_wire).expect("decode response");
+        let body = response.body_bytes().expect("body");
+        let mut tag_arr = [0u8; MAC_TAG_LEN];
+        tag_arr.copy_from_slice(&response.tag);
+        assert!(verify_tag(&FIXTURE_BOND_KEY, &body, &tag_arr));
+    }
+
     // ----- oob_code_for_bond -----
 
     #[test]
@@ -964,6 +1145,57 @@ mod tests {
         // syauth-core::bond::PUBKEY_LEN is the canonical 32. We re-pin it
         // locally; this test makes drift loud.
         assert_eq!(INVITE_PUBKEY_LEN, 32);
+    }
+
+    // ----- session_uuid_for_bond (DEV-003) -----
+
+    #[test]
+    fn session_uuid_for_bond_is_deterministic_per_minute() {
+        let bond_key = FIXTURE_BOND_KEY.to_vec();
+        let minute: i64 = 30_120_960;
+        let a = session_uuid_for_bond(bond_key.clone(), minute).expect("session uuid ok");
+        let b = session_uuid_for_bond(bond_key, minute).expect("session uuid ok");
+        assert_eq!(a, b, "same (bond_key, minute) must produce the same UUID bytes");
+        assert_eq!(a.len(), SESSION_UUID_BYTES_MOBILE);
+    }
+
+    #[test]
+    fn session_uuid_for_bond_rotates_per_minute() {
+        let bond_key = FIXTURE_BOND_KEY.to_vec();
+        let minute: i64 = 30_120_960;
+        let a = session_uuid_for_bond(bond_key.clone(), minute).expect("a");
+        let b = session_uuid_for_bond(bond_key, minute + 1).expect("b");
+        assert_ne!(a, b, "successive minutes must rotate");
+    }
+
+    #[test]
+    fn session_uuid_for_bond_rejects_bad_bond_key_length() {
+        let short = vec![0u8; MOBILE_BOND_KEY_LEN - 1];
+        let err = session_uuid_for_bond(short, 0).expect_err("short key rejected");
+        match err {
+            MobileError::InvalidKey { reason } => assert!(reason.contains(&MOBILE_BOND_KEY_LEN.to_string())),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_uuid_byte_identical_to_transport_fixture() {
+        // Recompute the HKDF directly with the same inputs the
+        // `syauth_transport::session_uuid_for` free function uses; the
+        // mobile copy must produce byte-identical output so the
+        // desktop's advertisement and the phone's scan filter agree.
+        let bond_key = FIXTURE_BOND_KEY.to_vec();
+        let minute: i64 = 1_800_000_000 / 60;
+        let via_mobile = session_uuid_for_bond(bond_key, minute).expect("uuid");
+        // Reference: same HKDF-SHA256(salt=None, ikm=bond_key, info=
+        //   "syauth-session-v1" || minute_be_bytes)[0..16].
+        let hk = Hkdf::<Sha256>::new(None, &FIXTURE_BOND_KEY);
+        let mut info = Vec::with_capacity(HKDF_INFO_SESSION_V1.len() + core::mem::size_of::<i64>());
+        info.extend_from_slice(HKDF_INFO_SESSION_V1);
+        info.extend_from_slice(&minute.to_be_bytes());
+        let mut expected = [0u8; SESSION_UUID_BYTES_MOBILE];
+        hk.expand(&info, &mut expected).expect("hkdf");
+        assert_eq!(via_mobile, expected);
     }
 
     #[test]

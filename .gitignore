@@ -1,0 +1,10 @@
+/target
+/crates/syauth-mobile/target
+/crates/syauth-mobile/bindings
+/syauth-android/.gradle
+/syauth-android/app/build
+/syauth-android/build
+/syauth-android/local.properties
+/.claude/worktrees
+*.iml
+.DS_Store

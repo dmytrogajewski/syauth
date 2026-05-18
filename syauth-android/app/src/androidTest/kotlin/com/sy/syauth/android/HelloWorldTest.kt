@@ -23,7 +23,9 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -39,6 +41,13 @@ class HelloWorldTest {
 
     @Test
     fun mainActivity_renders_oob_string_from_rust() {
+        // The home route stopped showing the OOB smoke text by default
+        // when the paired-device card landed; navigate to the
+        // diagnostic route via the home "?" button before asserting.
+        composeTestRule
+            .onNodeWithTag(HOME_DIAGNOSTIC_BUTTON_TAG)
+            .performClick()
+
         // Wait for the produceState coroutine to publish the real value
         // (initial value is "OOB: ..." with three dots; we want the value
         // produced by the UniFFI call to actually replace it).

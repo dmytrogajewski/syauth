@@ -59,9 +59,10 @@
 pub mod implementation;
 
 pub use implementation::{
-    ED25519_SECRET_KEY_LEN, ED25519_SIGNATURE_LEN, HKDF_INFO_OOB_V1, INVITE_PUBKEY_LEN, INVITE_QUERY_KEY_HOST, INVITE_QUERY_KEY_PUBKEY,
-    INVITE_URI_HOST_PATH, INVITE_URI_SCHEME, Invite, MOBILE_BOND_KEY_LEN, MobileError, OOB_WORD_COUNT, OOB_WORDS, build_response_frame,
-    oob_code_for_bond, parse_invite_uri, sign_challenge_response, verify_challenge_frame,
+    ED25519_SECRET_KEY_LEN, ED25519_SIGNATURE_LEN, FrameSigner, HKDF_INFO_OOB_V1, HKDF_INFO_SESSION_V1, INVITE_PUBKEY_LEN,
+    INVITE_QUERY_KEY_HOST, INVITE_QUERY_KEY_PUBKEY, INVITE_URI_HOST_PATH, INVITE_URI_SCHEME, Invite, MOBILE_BOND_KEY_LEN, MobileError,
+    OOB_WORD_COUNT, OOB_WORDS, SESSION_UUID_BYTES_MOBILE, build_response_frame, oob_code_for_bond, parse_invite_uri, session_uuid_for_bond,
+    sign_challenge_response, verify_challenge_frame,
 };
 
 /// Library version. Surfaced through UniFFI so the Kotlin caller can log
@@ -93,9 +94,11 @@ mod tests {
         type ParseFn = fn(String) -> Result<Invite, MobileError>;
         type FramedFn = fn(Vec<u8>, Vec<u8>) -> Result<Vec<u8>, MobileError>;
         type OobFn = fn(Vec<u8>) -> Result<Vec<String>, MobileError>;
+        type BuildFn = fn(Vec<u8>, Box<dyn FrameSigner>, Vec<u8>) -> Result<Vec<u8>, MobileError>;
         let _: ParseFn = parse_invite_uri;
         let _: FramedFn = verify_challenge_frame;
         let _: FramedFn = sign_challenge_response;
         let _: OobFn = oob_code_for_bond;
+        let _: BuildFn = build_response_frame;
     }
 }

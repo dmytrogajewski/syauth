@@ -72,10 +72,13 @@ public const val APPROVE_INTENT_SCHEME: String = "syauth"
  */
 public const val APPROVE_INTENT_HOST: String = "approve"
 
-/** Intent extras the approve route reads. */
-public const val EXTRA_CHALLENGE_B64: String = "syauth.extra.challenge_b64"
-public const val EXTRA_HOSTNAME: String = "syauth.extra.hostname"
-public const val EXTRA_PEER_ID: String = "syauth.extra.peer_id"
+// S-018 notification-deep-link intent extras (distinct from the
+// S-014 activity-launch extras in `ChallengeApprovalActivity.kt` —
+// the prefix disambiguates so a future contributor cannot conflate
+// the deep-link payload with the activity-extras payload).
+public const val APPROVE_EXTRA_CHALLENGE_B64: String = "syauth.extra.challenge_b64"
+public const val APPROVE_EXTRA_HOSTNAME: String = "syauth.extra.hostname"
+public const val APPROVE_EXTRA_PEER_ID: String = "syauth.extra.peer_id"
 
 /**
  * The `PendingIntent` request code is keyed on the notification id
@@ -164,9 +167,9 @@ public object ApproveNotification {
             data = Uri.fromParts(APPROVE_INTENT_SCHEME, APPROVE_INTENT_HOST, peerId)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-            putExtra(EXTRA_CHALLENGE_B64, encoded)
-            putExtra(EXTRA_HOSTNAME, hostname)
-            putExtra(EXTRA_PEER_ID, peerId)
+            putExtra(APPROVE_EXTRA_CHALLENGE_B64, encoded)
+            putExtra(APPROVE_EXTRA_HOSTNAME, hostname)
+            putExtra(APPROVE_EXTRA_PEER_ID, peerId)
         }
     }
 

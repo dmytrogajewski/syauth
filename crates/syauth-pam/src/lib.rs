@@ -4,15 +4,16 @@
 //! consumed by libpam's loader) and an `rlib` (so the panic-boundary helper
 //! can be exercised by ordinary Rust unit tests — see `entry::tests`).
 //!
-//! # S-009 state
+//! # S-008 state
 //!
-//! `pam_sm_authenticate` now drives a real challenge / response against an
-//! injectable `BtPeer`, verifies signature + tag + nonce-freshness, and
-//! returns the right PAM code. The mock peer is wired in by the integration
-//! tests in `tests/pam_e2e.rs`; production builds (where the `test-mock`
-//! Cargo feature is off and `cfg!(test)` is false) fall back to a stub real
-//! peer that returns `TransportError::NotPaired` — the real BlueZ peer
-//! arrives in S-019.
+//! `pam_sm_authenticate` is a thin Unix-socket RPC client to the
+//! `syauth-presenced` daemon (SPEC §3 scope item #11). The PAM module
+//! no longer drives BlueZ directly; the daemon owns the GATT + advertise
+//! stack and the heavy crypto. The module's only knob is the
+//! `socket=<path>` libpam argument (SPEC §3 scope item #12). On
+//! socket-missing / connect-refused / write-fail / response-timeout it
+//! returns `PAM_AUTHINFO_UNAVAIL` within ≤ 50 ms (SPEC §4.3
+//! daemon-down latency) so the stack falls through to FIDO / password.
 //!
 //! `pam_sm_setcred` still returns `PAM_SUCCESS` (no creds to set). The
 //! `pam_sm_acct_mgmt` symbol still returns `PAM_AUTHINFO_UNAVAIL` — account

@@ -1,0 +1,51 @@
+# syauth-presenced — long-running desktop user-service.
+#
+# SPEC anchor: specs/unlock-proximity/SPEC.md §3 Approach (per-user
+# user-systemd service), §4 Architecture, and §3 Decisions row
+# "Daemon process model" (per-user, not system).
+# Roadmap row: specs/unlock-proximity/ROADMAP.md Step S-001.
+# Journey: specs/journeys/JOURNEY-S-001-scaffold-syauth-presenced.md.
+#
+# Install path: ~/.config/systemd/user/syauth-presenced.service
+# Enable: systemctl --user daemon-reload && systemctl --user enable --now syauth-presenced
+# Logs:   journalctl --user -t syauth-presenced -f
+
+[Unit]
+Description=syauth phone-as-key presence daemon
+Documentation=https://github.com/sy/syauth specs/unlock-proximity/SPEC.md
+# Daemon binds ${XDG_RUNTIME_DIR}/syauth/auth.sock (S-002+) and
+# locks ${XDG_RUNTIME_DIR}/syauth/presenced.pid (S-001), so the
+# XDG_RUNTIME_DIR must exist before the unit starts.
+ConditionPathIsDirectory=%t
+
+[Service]
+Type=simple
+# The binary lives under /usr/local/libexec/syauth-presenced once
+# `syauth install-presenced` (S-009) is run. Until S-009 lands an
+# installer, operators can override via systemctl edit.
+ExecStart=/usr/local/libexec/syauth-presenced
+# Clean shutdown: SIGTERM is the default; the daemon's signal handler
+# drops the pidfile lock + unlinks the pidfile + exits within ~1s.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+# Restart on crash so a transient BlueZ adapter blip (S-003+) does
+# not require operator intervention. S-001 has no crash conditions
+# of its own; this setting is forward-looking for the BLE event loop
+# that arrives in S-003+.
+Restart=on-failure
+RestartSec=2
+# Sandboxing aligned with SPEC §7 Security ("only the daemon's own
+# UID can connect"). The pidfile + socket live under the per-user
+# runtime dir (already mode 0700 by systemd), so NoNewPrivileges is
+# the only meaningful sandbox knob a user-service can enforce.
+NoNewPrivileges=yes
+# Audit log path (SPEC §7) writes to /var/lib/syauth/last.log; the
+# daemon needs write access there even though it runs as the user.
+# An operator who wants the audit log under their $XDG_DATA_HOME can
+# override --bonds-file / --keys-dir / the audit path via a drop-in.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/syauth /var/log/syauth
+
+[Install]
+WantedBy=default.target

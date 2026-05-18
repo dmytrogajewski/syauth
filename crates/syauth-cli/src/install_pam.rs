@@ -31,11 +31,37 @@ pub const BACKUP_SUFFIX: &str = ".bak";
 /// module search path; we deliberately do NOT hard-code an absolute path).
 pub const DEFAULT_SO_NAME: &str = "pam_syauth.so";
 
-/// Default PAM module arguments inserted after the so-name.
-pub const DEFAULT_MODULE_ARGS: &str = "timeout=1200";
+/// Default PAM module arguments inserted after the so-name. Matches
+/// the daemon's `DEFAULT_AUTH_TIMEOUT` (8 s) so a real BiometricPrompt
+/// reaction has headroom before the PAM round-trip falls through to
+/// the next sufficient module.
+pub const DEFAULT_MODULE_ARGS: &str = "timeout=8000";
 
-/// PAM control flag for the inserted auth directive (per the S-013 DoD).
-pub const CONTROL_FLAG: &str = "required";
+/// Default PAM control flag for the inserted auth directive.
+///
+/// `sufficient` is the operator-facing default: when the phone is in
+/// range and the user approves on the biometric prompt, the auth
+/// stack short-circuits with success. When the phone is absent, the
+/// daemon is down, the BLE link is broken, or the user denies, the
+/// module returns `PAM_AUTHINFO_UNAVAIL` / `PAM_AUTH_ERR` and the
+/// stack falls through to the next module (typically `pam_u2f.so`
+/// for FIDO2 fallback).
+///
+/// `--control` lets the operator pick a different flag for testing
+/// (`required`, `[success=done auth_err=die default=ignore]`, etc.).
+pub const DEFAULT_CONTROL_FLAG: &str = "sufficient";
+
+/// Canonical line inserted by `--with-u2f-fallback`. Mirrors the
+/// `pam_u2f` directive shape already shipping under
+/// `/etc/pam.d/sudo` and `/etc/pam.d/gdm-password` on Fedora 43 so
+/// the post-install stack reads uniformly across services.
+pub const U2F_FALLBACK_LINE: &str = "auth    sufficient    pam_u2f.so cue";
+
+/// Recognition regex for any line that wires pam_u2f into the auth
+/// stack. Same shape as [`RECOGNITION_REGEX`] but for `pam_u2f.so`;
+/// drives the idempotency check that prevents `--with-u2f-fallback`
+/// from inserting a duplicate line on subsequent runs.
+const U2F_RECOGNITION_REGEX: &str = r"(?m)^\s*auth\s+\S+\s+pam_u2f\.so\b";
 
 /// PAM module type for the inserted directive.
 pub const MODULE_TYPE: &str = "auth";
@@ -97,6 +123,50 @@ pub struct InstallOpts {
     /// Skip the interactive confirmation prompt. Tests always pass this.
     #[arg(long)]
     pub yes: bool,
+
+    /// Also install the `syauth-presenced` systemd user unit (S-009).
+    /// Default `true` so the PAM edit and the daemon install are bundled.
+    /// Pass `--with-presenced=false` to install only the PAM line — e.g.
+    /// when the daemon is managed by the host distribution.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub with_presenced: bool,
+
+    /// When `--with-presenced=true`, forward this flag to the bundled
+    /// `install-presenced` step. Tests pass this so the bundled step does
+    /// not shell out to `systemctl`.
+    #[arg(long)]
+    pub presenced_dry_run: bool,
+
+    /// When `--with-presenced=true`, forward this directory override to the
+    /// bundled `install-presenced` step. Tests pass a tempdir here.
+    #[arg(long)]
+    pub presenced_unit_dir: Option<PathBuf>,
+
+    /// When `--with-presenced=true`, forward this source-binary override to
+    /// the bundled `install-presenced` step.
+    #[arg(long)]
+    pub presenced_from: Option<PathBuf>,
+
+    /// PAM control flag for the inserted auth directive. Defaults to
+    /// `sufficient` so a successful syauth round-trip short-circuits
+    /// the auth stack and a failed one falls through to the next
+    /// sufficient module (typically pam_u2f for FIDO2 fallback). Pass
+    /// `required` to make syauth the only path that can grant auth on
+    /// this service.
+    #[arg(long, default_value = DEFAULT_CONTROL_FLAG)]
+    pub control: String,
+
+    /// Also insert `auth sufficient pam_u2f.so cue` directly below
+    /// the syauth line if the service file does not already carry a
+    /// `pam_u2f.so` directive. Use this when wiring services that
+    /// today rely solely on a password fallback (`login`, `su`,
+    /// `runuser`, …) so the auth chain becomes
+    /// `syauth -> FIDO -> password`, matching the chain on services
+    /// where pam_u2f is pre-configured (`sudo`, `gdm-password`).
+    /// Idempotent: a second invocation with the flag is a no-op when
+    /// a pam_u2f line is already present.
+    #[arg(long, default_value_t = false)]
+    pub with_u2f_fallback: bool,
 }
 
 /// Typed error surface for `install_pam`.
@@ -174,8 +244,9 @@ fn backup_path(pam_dir: &Path, service: &str) -> PathBuf {
 /// Build the canonical inserted line (no trailing newline).
 fn build_line(opts: &InstallOpts) -> String {
     format!(
-        "{MODULE_TYPE}{sep}{CONTROL_FLAG}{sep}{so} {args}",
+        "{MODULE_TYPE}{sep}{ctrl}{sep}{so} {args}",
         sep = FIELD_SEPARATOR,
+        ctrl = opts.control,
         so = opts.so_path,
         args = opts.module_args
     )
@@ -269,29 +340,79 @@ pub fn install(opts: &InstallOpts) -> Result<InstallOutcome, InstallError> {
         return Err(InstallError::ServiceNotFound(service));
     }
     let original = read_utf8(&service)?;
-    // Idempotency: if the line is already present, exit before any write.
-    if recognition_regex().is_match(&original) {
+    let syauth_present = recognition_regex().is_match(&original);
+    let u2f_present = u2f_recognition_regex().is_match(&original);
+    let needs_u2f_insert = opts.with_u2f_fallback && !u2f_present;
+    // Idempotency: when the syauth line is already present AND the u2f
+    // fallback (if requested) is also already present, the file is in
+    // its target shape — exit before any write. The reverse case —
+    // syauth present but pam_u2f missing while `--with-u2f-fallback`
+    // is set — re-enters the write path to insert the fallback line
+    // below the existing syauth directive.
+    if syauth_present && !needs_u2f_insert {
         return Ok(InstallOutcome::AlreadyInstalled { path: service });
     }
-    let backup = backup_path(&opts.pam_dir, &opts.service);
-    if backup.exists() {
-        return Err(InstallError::BackupExists(backup));
-    }
     let mode = file_mode(&service)?;
-    // Take the backup BEFORE the atomic write so a crash after backup +
-    // before write still leaves the admin with a known-good snapshot at
-    // <service>.bak.
-    fs::copy(&service, &backup).map_err(|source| InstallError::Io {
-        path: backup.clone(),
-        source,
-    })?;
-    fs::set_permissions(&backup, fs::Permissions::from_mode(mode)).map_err(|source| InstallError::Io {
-        path: backup.clone(),
-        source,
-    })?;
-    let new_contents = insert_line(&original, &build_line(opts));
+    let backup = backup_path(&opts.pam_dir, &opts.service);
+    if !syauth_present {
+        // First-time install: take the backup BEFORE the atomic write
+        // so a crash after backup + before write still leaves the
+        // admin with a known-good snapshot at <service>.bak.
+        if backup.exists() {
+            return Err(InstallError::BackupExists(backup));
+        }
+        fs::copy(&service, &backup).map_err(|source| InstallError::Io {
+            path: backup.clone(),
+            source,
+        })?;
+        fs::set_permissions(&backup, fs::Permissions::from_mode(mode)).map_err(|source| InstallError::Io {
+            path: backup.clone(),
+            source,
+        })?;
+    }
+    // The body the next-stage transforms operate on. When syauth is
+    // already in place, skip the build_line insertion and apply the
+    // u2f fallback directly on top of the existing body.
+    let with_syauth = if syauth_present {
+        original
+    } else {
+        insert_line(&original, &build_line(opts))
+    };
+    let new_contents = maybe_insert_u2f_fallback(&with_syauth, opts.with_u2f_fallback);
     atomic_write(&service, &new_contents, mode)?;
     Ok(InstallOutcome::Installed { service, backup })
+}
+
+/// If `opts.with_u2f_fallback` is set and the body does not already
+/// carry a `pam_u2f.so` directive, insert [`U2F_FALLBACK_LINE`]
+/// directly below the syauth line so the resulting auth chain is
+/// `syauth -> pam_u2f -> next-module`. Pure fn: returns the original
+/// body untouched when the flag is false or when the file already
+/// declares pam_u2f, which keeps the call idempotent across repeated
+/// invocations.
+fn maybe_insert_u2f_fallback(body: &str, enabled: bool) -> String {
+    if !enabled {
+        return body.to_string();
+    }
+    if u2f_recognition_regex().is_match(body) {
+        return body.to_string();
+    }
+    let mut out = String::with_capacity(body.len() + U2F_FALLBACK_LINE.len() + 1);
+    let mut inserted = false;
+    for line in body.split_inclusive('\n') {
+        out.push_str(line);
+        if !inserted && line.contains("pam_syauth.so") {
+            out.push_str(U2F_FALLBACK_LINE);
+            out.push('\n');
+            inserted = true;
+        }
+    }
+    out
+}
+
+fn u2f_recognition_regex() -> &'static Regex {
+    static CELL: OnceLock<Regex> = OnceLock::new();
+    CELL.get_or_init(|| Regex::new(U2F_RECOGNITION_REGEX).expect("static u2f-recognition regex must compile"))
 }
 
 #[cfg(test)]
@@ -307,6 +428,12 @@ mod tests {
             module_args: DEFAULT_MODULE_ARGS.to_string(),
             so_path: DEFAULT_SO_NAME.to_string(),
             yes: true,
+            with_presenced: false,
+            presenced_dry_run: false,
+            presenced_unit_dir: None,
+            presenced_from: None,
+            control: DEFAULT_CONTROL_FLAG.to_string(),
+            with_u2f_fallback: false,
         }
     }
 
@@ -354,7 +481,42 @@ mod tests {
     fn build_line_uses_documented_defaults() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let line = build_line(&opts_for(dir.path()));
-        assert_eq!(line, "auth    required    pam_syauth.so timeout=1200");
+        assert_eq!(line, "auth    sufficient    pam_syauth.so timeout=8000");
+    }
+
+    #[test]
+    fn build_line_honours_custom_control_flag() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut opts = opts_for(dir.path());
+        opts.control = "required".to_string();
+        let line = build_line(&opts);
+        assert_eq!(line, "auth    required    pam_syauth.so timeout=8000");
+    }
+
+    #[test]
+    fn u2f_fallback_inserted_when_flag_set_and_no_existing_u2f() {
+        let body = "#%PAM-1.0\nauth    sufficient    pam_syauth.so timeout=8000\nauth       substack     system-auth\n";
+        let got = maybe_insert_u2f_fallback(body, true);
+        assert!(got.contains("auth    sufficient    pam_u2f.so cue"));
+        let syauth_idx = got.find("pam_syauth.so").expect("syauth present");
+        let u2f_idx = got.find("pam_u2f.so").expect("u2f inserted");
+        let substack_idx = got.find("substack").expect("substack present");
+        assert!(syauth_idx < u2f_idx);
+        assert!(u2f_idx < substack_idx);
+    }
+
+    #[test]
+    fn u2f_fallback_is_noop_when_flag_unset() {
+        let body = "#%PAM-1.0\nauth    sufficient    pam_syauth.so timeout=8000\nauth       substack     system-auth\n";
+        let got = maybe_insert_u2f_fallback(body, false);
+        assert_eq!(got, body);
+    }
+
+    #[test]
+    fn u2f_fallback_is_noop_when_already_present() {
+        let body = "#%PAM-1.0\nauth    sufficient    pam_syauth.so timeout=8000\nauth        sufficient    pam_u2f.so cue\nauth       substack     system-auth\n";
+        let got = maybe_insert_u2f_fallback(body, true);
+        assert_eq!(got, body);
     }
 
     #[test]

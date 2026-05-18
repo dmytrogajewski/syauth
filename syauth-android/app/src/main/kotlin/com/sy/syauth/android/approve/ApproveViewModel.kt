@@ -7,13 +7,15 @@
 //
 // Every external side-effect is injected behind an interface so the
 // unit tests can run on a pure JVM (no Robolectric, no Android crypto,
-// no UniFFI library loading). The five seams are:
+// no UniFFI library loading). The four seams are:
 //
 //   1. [BiometricPresenter]        — wraps BiometricPrompt.
 //   2. [KeystoreSignerBackend]     — wraps the Keystore EC gate.
-//   3. [SigningKeyProvider]        — wraps the Ed25519 seed source.
-//   4. [WireSigner]                — wraps the UniFFI Ed25519 surface.
-//   5. [ResponseSender]            — wraps the GATT response transport.
+//   3. [WireSigner]                — wraps the UniFFI Ed25519 surface
+//                                     (DEV-002: routes through a
+//                                     Keystore-resident Ed25519 key via
+//                                     the UniFFI `FrameSigner` callback).
+//   4. [ResponseSender]            — wraps the GATT response transport.
 //
 // Plus two utility seams ([Clock] and the constructor-injected
 // `tickMillis` / `timeoutMillis` constants) that let tests run the
@@ -92,18 +94,25 @@ public sealed class ApproveUiState {
  * class init; importing it in JVM-only unit tests fails with
  * `UnsatisfiedLinkError` on hosts without the AAR.
  */
-// NOTE: WireSigner now returns the fully-encoded response frame
-// the desktop's `pam_syauth` recv_frame decodes (version + nonce +
-// signature payload + MAC tag). Earlier S-017 returned only the
-// 64-byte signature; v0.1 wires the full frame so the on-wire
-// contract matches the desktop's `Frame::decode`.
+// DEV-002 NOTE: WireSigner now routes through the UniFFI
+// `FrameSigner` callback interface, so the Ed25519 private key
+// NEVER crosses the JVM <-> Rust boundary. The seam still returns
+// the fully-encoded response frame the desktop's `pam_syauth`
+// recv_frame decodes (version + nonce + signature payload + MAC
+// tag); the production implementation
+// ([com.sy.syauth.android.approve.UniffiWireSigner]) hands a
+// [com.sy.syauth.android.approve.KeystoreFrameSigner] to Rust at
+// construction time, and the Rust side calls back into Kotlin
+// once per sign to obtain the signature under the
+// `setUserAuthenticationRequired(true)` gate.
 public interface WireSigner {
     /**
-     * Sign [frameBytes] with [seed] and return the 64-byte Ed25519
-     * signature. Implementations MUST NOT throw — every failure becomes
-     * a typed [WireSignResult.Failure].
+     * Sign [frameBytes] under the bond identified by [bondKey] and
+     * return the fully-encoded response frame. Implementations MUST
+     * NOT throw — every failure becomes a typed
+     * [WireSignResult.Failure].
      */
-    public suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult
+    public suspend fun signWire(bondKey: ByteArray, frameBytes: ByteArray): WireSignResult
 }
 
 /** Typed result of a [WireSigner.signWire] call. */
@@ -152,8 +161,10 @@ public interface Clock {
  * @param challengeFrame the already-MAC-verified wire-frame bytes.
  * @param keystoreSigner Keystore-backed gate signer.
  * @param biometricPresenter wraps BiometricPrompt.
- * @param signingKeyProvider source for the Ed25519 seed.
- * @param wireSigner UniFFI surface adapter.
+ * @param wireSigner UniFFI surface adapter. DEV-002: the seed-bearing
+ *   `signingKeyProvider` parameter retired — the production
+ *   [WireSigner] is constructed with a Keystore-backed
+ *   `FrameSigner` and the private key never appears in this view.
  * @param responseSender ships the terminal frame back to the desktop.
  * @param clock test-injectable clock (unused outside tests today).
  * @param timeoutMillis total countdown length.
@@ -168,7 +179,6 @@ public class ApproveViewModel(
     private val bondKey: ByteArray,
     private val keystoreSigner: KeystoreSignerBackend,
     private val biometricPresenter: BiometricPresenter,
-    private val signingKeyProvider: SigningKeyProvider,
     private val wireSigner: WireSigner,
     private val responseSender: ResponseSender,
     private val clock: Clock = Clock.System,
@@ -312,14 +322,11 @@ public class ApproveViewModel(
             return
         }
 
-        val seedResult = signingKeyProvider.loadSeed()
-        if (seedResult !is SigningKeyResult.Ok) {
-            val msg = (seedResult as SigningKeyResult.Missing).reason
-            emitSignError(msg)
-            return
-        }
-
-        val wireResult = wireSigner.signWire(bondKey, seedResult.seed, challengeFrame)
+        // DEV-002: the seed-bearing [SigningKeyProvider] path is
+        // retired. The production [WireSigner] routes signing through
+        // the UniFFI `FrameSigner` callback into the Keystore-resident
+        // Ed25519 key; the private bytes never appear here.
+        val wireResult = wireSigner.signWire(bondKey, challengeFrame)
         if (wireResult !is WireSignResult.Ok) {
             val msg = (wireResult as WireSignResult.Failure).reason
             emitSignError(msg)

@@ -67,6 +67,7 @@ public fun SyauthTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = SyColorScheme,
         typography = SyTypography,
+        shapes = SyShapes,
         content = content,
     )
 }

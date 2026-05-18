@@ -13,6 +13,7 @@ members = [
     "crates/syauth-pam",
     "crates/syauth-cli",
     "crates/syauth-mobile",
+    "crates/syauth-presenced",
 ]
 # The `crates/syauth-core/fuzz` crate is a stand-alone libFuzzer harness; it is
 # only buildable on nightly with `cargo fuzz` instrumentation and is therefore
@@ -57,6 +58,17 @@ workspace = true
 [dev-dependencies]
 bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# DEV-001 TC-11: pins LESC-derived material → MAC + BondStore round-trip.
+syauth-core = { version = "0.1", path = "crates/syauth-core" }
+# DEV-001 TC-11: built-in `Bond` carries `time::OffsetDateTime`.
+time = { version = "0.3", features = ["macros"] }
+# DEV-003 cross-crate byte-identity: assert the mobile UniFFI
+# `session_uuid_for_bond` output matches the desktop transport's
+# `session_uuid_for` byte for byte so the phone's scan filter UUID
+# set always matches the desktop's advertised service UUID.
+syauth-transport = { version = "0.1", path = "crates/syauth-transport" }
+syauth-mobile = { version = "0.1", path = "crates/syauth-mobile" }
+uuid = { version = "1" }
 
 [profile.release]
 lto = "thin"

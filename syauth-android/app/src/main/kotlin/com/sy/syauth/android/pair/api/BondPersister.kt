@@ -17,25 +17,34 @@ package com.sy.syauth.android.pair.api
  * Snapshot of a successful pairing, ready to be written to storage.
  *
  * The [bondKey] is the negotiated bond key; [peerId] / [peerName] mirror
- * the [PeerHandle] the user picked.
+ * the [PeerHandle] the user picked. [keystoreAlias] + [phonePubkey] are
+ * the DEV-002 closure fields the production pair flow populates from the
+ * Keystore-minted Ed25519 keypair — both default to empty so older test
+ * fixtures keep compiling without re-stating the placeholders.
  */
 data class BondRecord(
     val peerId: String,
     val peerName: String,
     val bondKey: ByteArray,
+    val keystoreAlias: String = "",
+    val phonePubkey: ByteArray = ByteArray(0),
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is BondRecord) return false
         return peerId == other.peerId &&
             peerName == other.peerName &&
-            bondKey.contentEquals(other.bondKey)
+            bondKey.contentEquals(other.bondKey) &&
+            keystoreAlias == other.keystoreAlias &&
+            phonePubkey.contentEquals(other.phonePubkey)
     }
 
     override fun hashCode(): Int {
         var result = peerId.hashCode()
         result = 31 * result + peerName.hashCode()
         result = 31 * result + bondKey.contentHashCode()
+        result = 31 * result + keystoreAlias.hashCode()
+        result = 31 * result + phonePubkey.contentHashCode()
         return result
     }
 }

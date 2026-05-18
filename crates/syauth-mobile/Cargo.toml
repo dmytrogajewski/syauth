@@ -51,7 +51,7 @@ thiserror = "2"
 # `syauth-core` re-exports `Frame`, `compute_tag`, `verify_tag`,
 # `sign_frame`, `verify_frame`, and the typed errors we wrap into
 # `MobileError`. Pinned by path so the workspace resolves to one version.
-syauth-core = { path = "../syauth-core" }
+syauth-core = { version = "0.1", path = "../syauth-core" }
 
 # HKDF-SHA256 for `oob_code_for_bond`. The version pins match
 # `crates/syauth-cli/Cargo.toml` so the workspace resolves to a single

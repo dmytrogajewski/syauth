@@ -70,12 +70,12 @@ class ApproveNotificationTest {
         )
 
         assertEquals(Intent.ACTION_VIEW, intent.action)
-        val b64 = intent.getStringExtra(EXTRA_CHALLENGE_B64)
-        assertNotNull("EXTRA_CHALLENGE_B64 missing", b64)
+        val b64 = intent.getStringExtra(APPROVE_EXTRA_CHALLENGE_B64)
+        assertNotNull("APPROVE_EXTRA_CHALLENGE_B64 missing", b64)
         val decoded = Base64.decode(b64, B64_FLAGS)
         assertTrue("challenge must round-trip", decoded.contentEquals(TEST_CHALLENGE))
-        assertEquals(TEST_HOSTNAME, intent.getStringExtra(EXTRA_HOSTNAME))
-        assertEquals(TEST_PEER_ID, intent.getStringExtra(EXTRA_PEER_ID))
+        assertEquals(TEST_HOSTNAME, intent.getStringExtra(APPROVE_EXTRA_HOSTNAME))
+        assertEquals(TEST_PEER_ID, intent.getStringExtra(APPROVE_EXTRA_PEER_ID))
     }
 
     @Test

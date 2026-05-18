@@ -36,7 +36,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -64,6 +66,17 @@ pub const BOND_DIR_MODE: u32 = 0o700;
 /// Highest schema version this build understands. Bumped lock-step with
 /// every breaking schema change. Today we have one version.
 pub const BOND_SCHEMA_VERSION_LATEST: u32 = 1;
+
+/// HKDF `info` constant for the LESC-pair `bond_key` derivation
+/// implemented by [`bond_key_from_pubkeys`]. Versioned (`-v1`) so a
+/// future protocol revision can rotate without recomputing existing
+/// bonds. Mirrored on the Android side under `pair::impl::RealPairBackend`
+/// — both ends must agree byte-for-byte.
+pub const BOND_HKDF_INFO_V1: &[u8] = b"syauth-bond-v1";
+
+/// Width of the `bond_key` HKDF expand step emits — 32 bytes, matching
+/// `syauth_core::BOND_KEY_BYTES`.
+pub const BOND_KEY_DERIVED_BYTES: usize = 32;
 
 /// Octal permission mask we compare against when reading existing
 /// directory metadata. Anything stricter (e.g. 0o000) is fine; anything
@@ -123,6 +136,18 @@ pub struct Bond {
     pub created_at: OffsetDateTime,
     /// Current bond status.
     pub status: BondStatus,
+}
+
+impl Bond {
+    /// Return `true` iff the bond's [`BondStatus`] is
+    /// [`BondStatus::Revoked`]. Tiny named predicate so call sites
+    /// (e.g. the `syauth-presenced` reload diff in S-005) read as
+    /// `!b.is_revoked()` instead of an inline `matches!` on the
+    /// internal variant shape.
+    #[must_use]
+    pub fn is_revoked(&self) -> bool {
+        matches!(self.status, BondStatus::Revoked { .. })
+    }
 }
 
 /// On-disk representation of the entire bond file.
@@ -237,6 +262,39 @@ pub fn peer_id_from_pubkey(pubkey: &[u8; PUBKEY_LEN]) -> String {
     let hash = blake3::hash(pubkey);
     let bytes = &hash.as_bytes()[..PEER_ID_BLAKE3_BYTES];
     hex_lowercase(bytes)
+}
+
+/// Derive the 32-byte shared `bond_key` from the host and phone
+/// Ed25519 public keys exchanged over the LESC-encrypted pair channel.
+///
+/// HKDF input keying material is `host_pubkey || phone_pubkey`
+/// (concatenation, in that order). Salt is `None`: the LESC link
+/// already guarantees the inputs were not observed by a third party,
+/// and adding a salt the two sides would have to negotiate buys no
+/// additional security. `info` is [`BOND_HKDF_INFO_V1`].
+///
+/// Output length is [`BOND_KEY_DERIVED_BYTES`] (32 bytes). The
+/// expansion never fails for a 32-byte output, but the implementation
+/// matches the result anyway rather than `unwrap()`-ing per the
+/// AGENTS.md non-negotiables; an internal HKDF error returns an
+/// all-zero buffer that the call-site can detect by equality.
+///
+/// Both the desktop (`syauth-cli::pair_backend::BluerPairBackend`) and
+/// the Android client (`RealPairBackend`) call this function with the
+/// SAME byte ordering of inputs so the two derived buffers match. A
+/// mismatch in argument order is the exact failure mode TC-04
+/// ("App-level OOB mismatch") pins down.
+#[must_use]
+pub fn bond_key_from_pubkeys(host_pubkey: &[u8; PUBKEY_LEN], phone_pubkey: &[u8; PUBKEY_LEN]) -> [u8; BOND_KEY_DERIVED_BYTES] {
+    let mut ikm = [0u8; PUBKEY_LEN * 2];
+    ikm[..PUBKEY_LEN].copy_from_slice(host_pubkey);
+    ikm[PUBKEY_LEN..].copy_from_slice(phone_pubkey);
+    let hk = Hkdf::<Sha256>::new(None, &ikm);
+    let mut out = [0u8; BOND_KEY_DERIVED_BYTES];
+    match hk.expand(BOND_HKDF_INFO_V1, &mut out) {
+        Ok(()) => out,
+        Err(_) => [0u8; BOND_KEY_DERIVED_BYTES],
+    }
 }
 
 /// Render `bytes` as lowercase hex without going through `format!`'s
@@ -576,6 +634,26 @@ mod tests {
         assert_ne!(peer_id_from_pubkey(&SAMPLE_PUBKEY_A), peer_id_from_pubkey(&SAMPLE_PUBKEY_B));
     }
 
+    // DEV-001: bond_key derivation from host + phone pubkeys.
+    #[test]
+    fn bond_key_from_pubkeys_is_deterministic_for_fixed_inputs() {
+        let a = bond_key_from_pubkeys(&SAMPLE_PUBKEY_A, &SAMPLE_PUBKEY_B);
+        let b = bond_key_from_pubkeys(&SAMPLE_PUBKEY_A, &SAMPLE_PUBKEY_B);
+        assert_eq!(a, b, "same inputs must yield the same bond_key");
+        assert_eq!(a.len(), BOND_KEY_DERIVED_BYTES);
+        assert_ne!(a, [0u8; BOND_KEY_DERIVED_BYTES], "bond_key must not be all zeros");
+    }
+
+    #[test]
+    fn bond_key_from_pubkeys_is_order_sensitive() {
+        // Argument order matters: swapping host/phone produces a different
+        // 32-byte buffer. Both sides MUST pass the same byte order so the
+        // derived keys converge.
+        let host_first = bond_key_from_pubkeys(&SAMPLE_PUBKEY_A, &SAMPLE_PUBKEY_B);
+        let phone_first = bond_key_from_pubkeys(&SAMPLE_PUBKEY_B, &SAMPLE_PUBKEY_A);
+        assert_ne!(host_first, phone_first, "ordering must matter");
+    }
+
     // TC-02
     #[test]
     fn load_missing_file_returns_empty_store() {
@@ -813,6 +891,17 @@ mod tests {
         fs::write(&path, body).expect("write");
         let err = BondStore::load(&path).expect_err("must reject mismatch");
         assert!(matches!(err, BondError::PeerIdMismatch { .. }));
+    }
+
+    // TC-04 (JOURNEY-S-005): `Bond::is_revoked()` predicate.
+    #[test]
+    fn is_revoked_predicate_matches_status_variant() {
+        let mut bonded = sample_bond(SAMPLE_PUBKEY_A, "alex");
+        assert!(!bonded.is_revoked(), "fresh bond must not report revoked");
+        bonded.status = BondStatus::Revoked {
+            reason: "phone-lost".to_owned(),
+        };
+        assert!(bonded.is_revoked(), "revoked bond must report revoked");
     }
 
     #[test]

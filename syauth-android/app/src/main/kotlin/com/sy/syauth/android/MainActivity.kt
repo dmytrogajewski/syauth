@@ -34,6 +34,8 @@ import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +44,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -69,27 +72,50 @@ import com.sy.syauth.android.approve.AndroidBiometricPresenter
 import com.sy.syauth.android.approve.AndroidKeystoreSigner
 import com.sy.syauth.android.approve.ApproveScreen
 import com.sy.syauth.android.approve.ApproveViewModel
-import com.sy.syauth.android.approve.InMemorySigningKeyProvider
+import com.sy.syauth.android.approve.KeystoreFrameSigner
 import com.sy.syauth.android.approve.UniffiWireSigner
+import com.sy.syauth.android.bg.APPROVE_EXTRA_CHALLENGE_B64
+import com.sy.syauth.android.bg.APPROVE_EXTRA_HOSTNAME
+import com.sy.syauth.android.bg.APPROVE_EXTRA_PEER_ID
 import com.sy.syauth.android.bg.B64_FLAGS
-import com.sy.syauth.android.bg.EXTRA_CHALLENGE_B64
-import com.sy.syauth.android.bg.EXTRA_HOSTNAME
-import com.sy.syauth.android.bg.EXTRA_PEER_ID
+import com.sy.syauth.android.bg.BondKeyProvider
+import com.sy.syauth.android.bg.BondListProvider
+import com.sy.syauth.android.bg.CancelSink
+import com.sy.syauth.android.bg.ChallengeApprovalActivity
+import com.sy.syauth.android.bg.ChallengeNotificationDispatcher
+import com.sy.syauth.android.bg.DENIED_FRAME_BYTES
+import com.sy.syauth.android.bg.GattClientFactory
 import com.sy.syauth.android.bg.GattResponseSender
-import com.sy.syauth.android.bg.SyauthGattHostService
+import com.sy.syauth.android.bg.HISTORY_OUTCOME_DENIED
+import com.sy.syauth.android.bg.HISTORY_OUTCOME_GRANTED
+import com.sy.syauth.android.bg.HISTORY_ROUTE_INTENT_HOST
+import com.sy.syauth.android.bg.HISTORY_ROUTE_INTENT_SCHEME
+import com.sy.syauth.android.bg.HostnameResolver
+import com.sy.syauth.android.bg.KeystoreAliasResolver
+import com.sy.syauth.android.bg.ResponseSink
+import com.sy.syauth.android.bg.PersistentGattClient
+import com.sy.syauth.android.bg.PersistentGattClientRegistry
+import com.sy.syauth.android.bg.PersistentManagedClient
+import com.sy.syauth.android.bg.SyauthCompanionService
+import com.sy.syauth.android.bg.SyauthWatchdogWorker
+import com.sy.syauth.android.bg.UniffiChallengeVerifier
+import com.sy.syauth.android.bg.WATCHDOG_INTERVAL
+import com.sy.syauth.android.bg.WATCHDOG_WORK_NAME
+import com.sy.syauth.android.history.ChallengeHistoryDao
+import com.sy.syauth.android.history.ChallengeHistoryRecord
+import com.sy.syauth.android.history.HISTORY_DISPLAY_LIMIT
+import com.sy.syauth.android.bond.BondRecord
+import com.sy.syauth.android.bond.BOND_RECORD_FILE_NAME
+import com.sy.syauth.android.bond.BondStore
+import com.sy.syauth.android.bond.DiskBondPersister
+import com.sy.syauth.android.bond.loadPersistedBond
 import com.sy.syauth.android.pair.PairingScreen
 import com.sy.syauth.android.pair.PairingViewModel
-import com.sy.syauth.android.pair.api.LescResult
-import com.sy.syauth.android.pair.api.PairBackend
-import com.sy.syauth.android.pair.api.PeerHandle
-import com.sy.syauth.android.pair.api.PickPeerResult
+import com.sy.syauth.android.pair.impl.AndroidCdmPairCompanionScanner
+import com.sy.syauth.android.pair.impl.InlineExecutor
+import com.sy.syauth.android.pair.impl.RealPairBackend
 import com.sy.syauth.android.pair.impl.ReflectionBondRemover
 import com.sy.syauth.android.pair.impl.UniffiOobCalculator
-import com.sy.syauth.android.provision.BOOTSTRAP_NO_BOND_TOAST
-import com.sy.syauth.android.provision.BondRecord
-import com.sy.syauth.android.provision.BondStore
-import com.sy.syauth.android.provision.DiskBondPersister
-import com.sy.syauth.android.provision.bootstrapBond
 import uniffi.syauth_mobile.oobCodeForBond
 
 /**
@@ -101,6 +127,27 @@ const val OOB_TEST_TAG: String = "syauth.hello.oob"
 
 /** Test tag attached to the "Pair" button on the home route (S-016). */
 const val HOME_PAIR_BUTTON_TAG: String = "syauth.home.pair"
+
+/** Test tag attached to the "Re-pair" button on the paired-state home card. */
+const val HOME_REPAIR_BUTTON_TAG: String = "syauth.home.repair"
+
+/** Test tag attached to the "Revoke" button on the paired-state home card. */
+const val HOME_REVOKE_BUTTON_TAG: String = "syauth.home.revoke"
+
+/** Test tag attached to the "?" diagnostic button on the home route. */
+const val HOME_DIAGNOSTIC_BUTTON_TAG: String = "syauth.home.diagnostic"
+
+// Bond store filename comes from `BondStore.BOND_RECORD_FILE_NAME` so this
+// route never duplicates the literal.
+
+/** Number of `peer_id` hex characters surfaced in the home-route card. */
+private const val PEER_ID_DISPLAY_PREFIX_LEN: Int = 8
+
+/** Suffix appended to the truncated peer_id so the operator sees it is abbreviated. */
+private const val PEER_ID_TRUNCATION_SUFFIX: String = "…" // ellipsis
+
+/** Date format pattern surfaced under "paired:" on the home card. */
+private const val PAIRED_AT_FORMAT_PATTERN: String = "yyyy-MM-dd HH:mm"
 
 /**
  * Fixed bond_key fixture used by the hello-world screen. 32 bytes, the
@@ -126,6 +173,25 @@ object NavRoutes {
     const val HOME: String = "home"
     const val PAIR: String = "pair"
     const val APPROVE: String = "approve"
+
+    /**
+     * Per-transaction history view (S-018). Reached via tap on an
+     * audit notification posted on
+     * `NOTIFICATION_CHANNEL_HISTORY`, or by direct navigation in
+     * tests.
+     */
+    const val HISTORY: String = "history"
+
+    /**
+     * The hello-world / UniFFI smoke route. `HelloWorldTest` navigates
+     * here before asserting that `oobCodeForBond` produced a four-word
+     * render, so a regression in the UniFFI bindings is still caught
+     * even after the home route stopped showing the smoke text by
+     * default (the operator's home view is now the paired-device
+     * card; the smoke surface is reachable via the home route's "?"
+     * button).
+     */
+    const val DIAGNOSTIC: String = "diagnostic"
 }
 
 /**
@@ -169,11 +235,25 @@ internal data class ApprovePayload(
 internal fun parseApprovePayload(intent: Intent?): ApprovePayload? {
     if (intent == null) return null
     if (intent.action != Intent.ACTION_VIEW) return null
-    val b64 = intent.getStringExtra(EXTRA_CHALLENGE_B64) ?: return null
-    val hostname = intent.getStringExtra(EXTRA_HOSTNAME) ?: return null
-    val peerId = intent.getStringExtra(EXTRA_PEER_ID) ?: return null
+    val b64 = intent.getStringExtra(APPROVE_EXTRA_CHALLENGE_B64) ?: return null
+    val hostname = intent.getStringExtra(APPROVE_EXTRA_HOSTNAME) ?: return null
+    val peerId = intent.getStringExtra(APPROVE_EXTRA_PEER_ID) ?: return null
     val bytes = runCatching { Base64.decode(b64, B64_FLAGS) }.getOrNull() ?: return null
     return ApprovePayload(challengeBytes = bytes, hostname = hostname, peerId = peerId)
+}
+
+/**
+ * Detect a history deep-link intent (S-018). True when the intent
+ * has `ACTION_VIEW` AND the data URI scheme + host match
+ * `syauth://history`. Mutually exclusive with [parseApprovePayload]
+ * because the approve deep-link uses host `approve` instead.
+ */
+internal fun parseHistoryDeepLink(intent: Intent?): Boolean {
+    if (intent == null) return false
+    if (intent.action != Intent.ACTION_VIEW) return false
+    val data = intent.data ?: return false
+    return data.scheme == HISTORY_ROUTE_INTENT_SCHEME &&
+        data.schemeSpecificPart.startsWith(HISTORY_ROUTE_INTENT_HOST)
 }
 
 class MainActivity : FragmentActivity() {
@@ -185,15 +265,10 @@ class MainActivity : FragmentActivity() {
     internal val approvePayload = mutableStateOf<ApprovePayload?>(null)
 
     /**
-     * Bond record resolved by the bootstrap path.
-     *
-     * GAP: DEV-001 — the bootstrap currently reads the bond from a
-     * plaintext provision file (`provision/BondBootstrap.kt`) instead
-     * of via SPEC §3.2 D5 LESC pairing. GAP: DEV-002 — the Ed25519
-     * seed inside this record is fed straight into
-     * `InMemorySigningKeyProvider` instead of an Android Keystore
-     * STRONGBOX handle with `setUserAuthenticationRequired(true)` per
-     * SPEC §3.2 D6. See `docs/known-gaps.md` for closure plans.
+     * Bond record resolved from the on-disk store written by the LESC
+     * + app-OOB pair flow. DEV-002 closure: the record carries only
+     * the Keystore alias for the Ed25519 signing key — the private
+     * bytes never appear on disk or in memory.
      *
      * Held in a `mutableStateOf` so Compose re-renders if a future
      * code path mutates the bond mid-session (none does today; the
@@ -202,33 +277,56 @@ class MainActivity : FragmentActivity() {
     internal val bondRecord = mutableStateOf<BondRecord?>(null)
 
     /**
-     * Runtime permission gate for the foreground GATT host service.
-     * Android 14 enforces that a `connectedDevice`-type foreground
-     * service can only start when the caller holds at least one of
-     * `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` / `BLUETOOTH_SCAN`
-     * at runtime. The manifest declaration is necessary but not
-     * sufficient — the user must grant the runtime dialog. We request
-     * all three so the service start always lands.
+     * Runtime permission gate for the post-bond GATT client path.
+     * After the DEV-001 CDM pivot the OS picker
+     * (`CompanionDeviceManager.associate`) runs the BLE scan under
+     * system privileges, so `BLUETOOTH_SCAN` is no longer required;
+     * only `BLUETOOTH_CONNECT` is needed to open the GATT client
+     * connection after the user picks the desktop. DEV-003 removed
+     * the legacy advertise permission — the phone never advertises
+     * again.
+     *
+     * `SyauthCompanionService` is bound by the OS when the
+     * CompanionDeviceManager observes the associated desktop in
+     * range; we do NOT call `startForegroundService` ourselves. The
+     * grant is pre-warmed here so the first observation lands
+     * without a runtime dialog. If the user denies, the next
+     * observation falls back to the OS dialog the OS surfaces from
+     * within the CompanionDeviceService binding.
      */
     private val bluetoothPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
         val anyGranted = grants.values.any { it }
-        if (anyGranted) {
-            startGattHostServiceIfBonded()
-        } else {
-            Log.w(PERMISSION_LOG_TAG, "BLE runtime permissions denied; host service not started")
+        if (!anyGranted) {
+            Log.w(PERMISSION_LOG_TAG, "BLE runtime permissions denied; companion path stays idle")
         }
     }
 
-    private fun startGattHostServiceIfBonded() {
-        if (bondRecord.value == null) return
-        runCatching {
-            startForegroundService(Intent(this, SyauthGattHostService::class.java))
-        }.onFailure {
-            Log.w(PERMISSION_LOG_TAG, "startForegroundService threw: ${it.message}")
+    /**
+     * Lazily-constructed CDM pair-mode scanner. Holds the running
+     * association request between `startScan` and the picker callback;
+     * resolves [AndroidCdmPairCompanionScanner.onPickerResult] from the
+     * [cdmPickerLauncher] below.
+     */
+    internal var cdmPairScanner: AndroidCdmPairCompanionScanner? = null
+
+    /**
+     * Activity-Result launcher that drives the CDM-picker IntentSender.
+     * Must be registered before `onCreate` completes; field-init is the
+     * canonical location. The callback forwards the picker result back
+     * into the active [cdmPairScanner] which resolves the pending
+     * onPicked / onFailed continuation the [RealPairBackend] stashed.
+     */
+    private val cdmPickerLauncher: ActivityResultLauncher<IntentSenderRequest> =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+            val scanner = cdmPairScanner
+            if (scanner == null) {
+                Log.w(PERMISSION_LOG_TAG, "CDM picker result with no active scanner")
+                return@registerForActivityResult
+            }
+            scanner.onPickerResult(result.resultCode, result.data)
         }
-    }
 
     private fun haveAnyBluetoothRuntimePermission(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
@@ -237,18 +335,230 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Install the bond-keyed seams `SyauthCompanionService` consults
+     * on every `onDeviceAppeared`. After DEV-003 the host service is
+     * gone, so this activity is the one production site that
+     * publishes the seams.
+     */
+    /**
+     * On cold start, iterate every CDM association this package owns
+     * and start `CompanionDeviceManager.startObservingDevicePresence`
+     * for the ones matching the bonded peer. The OS treats the
+     * call as idempotent; we err on the side of starting all matching
+     * associations (the device has many stale rows from pair retries
+     * — each one ends with the SAME MAC, so observing any of them
+     * lets the OS bind `SyauthCompanionService` on proximity).
+     *
+     * Without this, `mNotifyOnDeviceNearby` stays `false` on every
+     * association and the unlock service never gets bound, which
+     * gives `pam_syauth` a `response-timeout` on every unlock.
+     */
+    private fun startObservingForBondedAssociations(record: BondRecord) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val manager = getSystemService(android.companion.CompanionDeviceManager::class.java) ?: return
+        val scanner = cdmPairScanner ?: return
+        val targetMac = record.peerId.uppercase()
+        val matched = runCatching {
+            manager.myAssociations.filter { info ->
+                info.deviceMacAddress?.toString()?.uppercase() == targetMac
+            }
+        }.getOrDefault(emptyList())
+        if (matched.isEmpty()) {
+            Log.w(PERMISSION_LOG_TAG, "no CDM associations match bonded mac=$targetMac")
+            return
+        }
+        for (info in matched) {
+            scanner.startObservingDevicePresence(info.id)
+        }
+    }
+
+    private fun installCompanionSeams(record: BondRecord) {
+        SyauthCompanionService.bondKeyProvider = BondKeyProvider { peerId ->
+            if (peerId == record.peerId) record.bondKey else null
+        }
+        SyauthCompanionService.hostnameResolver = HostnameResolver { peerId ->
+            if (peerId == record.peerId) record.hostName else peerId
+        }
+        // S-015: route the activity's BiometricGate to the bond's
+        // per-bond Keystore-resident Ed25519 private key by the
+        // alias minted at pair time (DEV-002).
+        SyauthCompanionService.keystoreAliasResolver = KeystoreAliasResolver { peerId ->
+            if (peerId == record.peerId) record.keystoreAlias else ""
+        }
+        if (SyauthCompanionService.challengeVerifier == null) {
+            SyauthCompanionService.challengeVerifier = UniffiChallengeVerifier()
+        }
+        val historyDispatcher = challengeNotificationDispatcher()
+        // S-014: route the activity's Cancel button back through the
+        // per-peer PersistentGattClient so the denied frame goes out
+        // on the same GATT connection the challenge arrived on.
+        // S-018: AFTER `writeResponse` returns, append a history
+        // record and (subject to the rate limiter) post a
+        // low-priority notification on
+        // `NOTIFICATION_CHANNEL_HISTORY`.
+        ChallengeApprovalActivity.cancelSink = CancelSink { peerId, deniedFrameBytes ->
+            val client = PersistentGattClientRegistry.lookup(peerId)
+            if (client == null) {
+                Log.w(PERMISSION_LOG_TAG, "cancel: no persistent client for peer=$peerId")
+            } else {
+                runCatching { client.writeResponse(deniedFrameBytes) }
+                    .onFailure { Log.w(PERMISSION_LOG_TAG, "cancel: writeResponse failed peer=$peerId", it) }
+            }
+            historyDispatcher.dispatch(
+                hostname = record.hostName,
+                peerId = peerId,
+                outcome = HISTORY_OUTCOME_DENIED,
+            )
+        }
+        // S-015: route the activity's BiometricPrompt response (the
+        // 64-byte Ed25519 signature on success, DENIED_FRAME_BYTES on
+        // biometric fail) back through the same PersistentGattClient.
+        // S-018: append the history record + audit notification AFTER
+        // `writeResponse` returns; outcome is `granted` when the
+        // response bytes are a real signature (i.e. not the
+        // canonical denied payload) and `denied` otherwise.
+        ChallengeApprovalActivity.responseSink = ResponseSink { peerId, responseBytes ->
+            val client = PersistentGattClientRegistry.lookup(peerId)
+            if (client == null) {
+                Log.w(PERMISSION_LOG_TAG, "approve: no persistent client for peer=$peerId")
+            } else {
+                runCatching { client.writeResponse(responseBytes) }
+                    .onFailure { Log.w(PERMISSION_LOG_TAG, "approve: writeResponse failed peer=$peerId", it) }
+            }
+            val outcome = if (responseBytes.contentEquals(DENIED_FRAME_BYTES)) {
+                HISTORY_OUTCOME_DENIED
+            } else {
+                HISTORY_OUTCOME_GRANTED
+            }
+            historyDispatcher.dispatch(
+                hostname = record.hostName,
+                peerId = peerId,
+                outcome = outcome,
+            )
+        }
+        // S-015: the production BiometricGate is the
+        // `AndroidBiometricGate` the activity constructs against
+        // itself at onCreate; the companion seam's `biometricGate`
+        // field is left `null` here so the activity's per-instance
+        // production path runs. Tests install a recording fake on
+        // the seam, which takes precedence over the per-instance
+        // production path.
+    }
+
+    /**
+     * Install the S-011 [GattClientFactory] + [BondListProvider]
+     * seams the long-running foreground `SyauthCompanionService`
+     * consults at `onCreate`. Each `PersistentGattClient` opens the
+     * persistent `autoConnect=true` link for one bonded peer. This
+     * is the sole Android-side unlock path; S-013 closed the
+     * parallel legacy direct-GATT factory.
+     */
+    private fun installPersistentClientFactory(record: BondRecord) {
+        val applicationContext = this.applicationContext
+        val adapter = runCatching {
+            (getSystemService(BluetoothManager::class.java))?.adapter
+        }.getOrNull()
+        if (adapter == null) {
+            Log.w(PERMISSION_LOG_TAG, "Persistent factory: no BluetoothAdapter; skipping registration")
+            return
+        }
+        SyauthCompanionService.gattClientFactory = GattClientFactory { bond ->
+            val client = PersistentGattClient(
+                context = applicationContext,
+                adapter = adapter,
+                peerId = bond.peerId,
+                deviceMac = bond.peerId,
+                onChallenge = { peerId, frameBytes ->
+                    // Strip the trailing 16-byte MAC tag so the
+                    // signature is computed over the frame body only
+                    // (version || nonce || payload), matching the
+                    // daemon's verify_frame(body_bytes) contract.
+                    val challengeBody = if (frameBytes.size > 16) {
+                        frameBytes.copyOfRange(0, frameBytes.size - 16)
+                    } else {
+                        frameBytes
+                    }
+                    SyauthCompanionService.launchApprovalActivity(
+                        applicationContext,
+                        peerId,
+                        challengeBody,
+                    )
+                },
+            )
+            PersistentGattClientRegistry.put(bond.peerId, client)
+            PersistentManagedClient(client)
+        }
+        SyauthCompanionService.bondListProvider = BondListProvider { listOf(record) }
+    }
+
+    /**
+     * Issue an explicit `startForegroundService` to the foreground
+     * `SyauthCompanionService`. Only reached from the `record != null`
+     * branch in `onCreate`, so the no-bond path stays idle (the
+     * service would crash with the 5-second `startForeground`
+     * timeout otherwise).
+     */
+    private fun startSyauthCompanionForegroundService() {
+        val intent = Intent(this, SyauthCompanionService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    /**
+     * Enqueue the S-012 watchdog. Periodic, every [WATCHDOG_INTERVAL]
+     * (the Android `PeriodicWorkRequest` floor of 15 minutes). The
+     * unique work name [WATCHDOG_WORK_NAME] plus
+     * `ExistingPeriodicWorkPolicy.KEEP` makes the call idempotent —
+     * re-launching the app after a process death does not pile up
+     * scheduled jobs.
+     */
+    private fun scheduleSyauthWatchdog() {
+        val request = androidx.work.PeriodicWorkRequestBuilder<SyauthWatchdogWorker>(
+            WATCHDOG_INTERVAL,
+        ).build()
+        androidx.work.WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
+            WATCHDOG_WORK_NAME,
+            androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+            request,
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            cdmPairScanner = AndroidCdmPairCompanionScanner(
+                activity = this,
+                launcher = cdmPickerLauncher,
+                executor = InlineExecutor(),
+            )
+        }
         approvePayload.value = parseApprovePayload(intent)
-        val record = runCatching { bootstrapBond(this) }.getOrNull()
+        val record = runCatching { loadPersistedBond(filesDir) }.getOrNull()
         bondRecord.value = record
         if (record == null) {
-            Toast.makeText(this, BOOTSTRAP_NO_BOND_TOAST, Toast.LENGTH_LONG).show()
-        } else if (haveAnyBluetoothRuntimePermission()) {
-            startGattHostServiceIfBonded()
+            Toast.makeText(this, NO_BOND_TOAST, Toast.LENGTH_LONG).show()
         } else {
-            bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
+            installCompanionSeams(record)
+            installPersistentClientFactory(record)
+            startObservingForBondedAssociations(record)
+            if (!haveAnyBluetoothRuntimePermission()) {
+                bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
+            }
+            startSyauthCompanionForegroundService()
+            scheduleSyauthWatchdog()
         }
+        // DEV-003: with the desktop now advertising, the phone-side
+        // foreground service is gated entirely by the
+        // CompanionDeviceManager association created during the LESC
+        // pair flow. The OS binds `SyauthCompanionService` when the
+        // associated peer comes into range; we never start it
+        // ourselves. If no CDM association exists (user has not yet
+        // paired), the path stays idle — the toast above prompts the
+        // user to pair first.
         setContent {
             SyauthTheme {
                 Surface(
@@ -259,6 +569,8 @@ class MainActivity : FragmentActivity() {
                         activity = this,
                         approvePayload = approvePayload.value,
                         bondRecord = bondRecord.value,
+                        cdmPairScanner = cdmPairScanner,
+                        onRevoke = ::onBondRevokeTapped,
                     )
                 }
             }
@@ -270,6 +582,43 @@ class MainActivity : FragmentActivity() {
         setIntent(intent)
         approvePayload.value = parseApprovePayload(intent)
     }
+
+    /**
+     * Build a `ChallengeNotificationDispatcher` against the activity's
+     * application context and `filesDir`-backed
+     * [ChallengeHistoryDao]. S-018 wiring: invoked once from
+     * `installCompanionSeams` to construct the dispatcher the
+     * `cancelSink` / `responseSink` closures share.
+     */
+    private fun challengeNotificationDispatcher(): ChallengeNotificationDispatcher =
+        ChallengeNotificationDispatcher(
+            context = applicationContext,
+            dao = ChallengeHistoryDao(filesDir = filesDir),
+        )
+
+    /**
+     * Operator-driven bond-revoke. Deletes the on-disk bond record
+     * (`filesDir/syauth-bond.toml`) and the Keystore entry under the
+     * bond's `keystoreAlias`, then clears the `bondRecord` state so
+     * the Home route flips back to the unpaired card.
+     *
+     * Does NOT touch the OS-level LE Secure Connections bond — that
+     * lives in Android's Bluetooth settings and requires
+     * `BLUETOOTH_PRIVILEGED` (which a third-party app cannot hold).
+     * The Home card surfaces the residual-OS-bond caveat in plain
+     * text so the operator can finish the revoke in BT Settings if
+     * they want.
+     */
+    internal fun onBondRevokeTapped() {
+        val record = bondRecord.value ?: return
+        val bondFile = java.io.File(filesDir, BOND_RECORD_FILE_NAME)
+        runCatching { bondFile.delete() }
+        runCatching {
+            val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (ks.containsAlias(record.keystoreAlias)) ks.deleteEntry(record.keystoreAlias)
+        }
+        bondRecord.value = null
+    }
 }
 
 @Composable
@@ -277,22 +626,48 @@ private fun SyauthApp(
     activity: FragmentActivity,
     approvePayload: ApprovePayload?,
     bondRecord: BondRecord?,
+    cdmPairScanner: AndroidCdmPairCompanionScanner?,
+    onRevoke: () -> Unit,
 ) {
     val navController = rememberNavController()
+    val homeContext = activity.applicationContext
     NavHost(navController = navController, startDestination = NavRoutes.HOME) {
         composable(NavRoutes.HOME) {
+            // Surface the bond file's mtime as the "paired:" line. The
+            // BondRecord schema does not carry the timestamp so we
+            // consult the file's last-modified instead; this is enough
+            // for the operator to tell stale pairs apart at a glance.
+            val pairedAtMillis = remember(bondRecord) {
+                if (bondRecord == null) {
+                    0L
+                } else {
+                    runCatching {
+                        java.io.File(homeContext.filesDir, BOND_RECORD_FILE_NAME).lastModified()
+                    }.getOrDefault(0L)
+                }
+            }
             HomeRoute(
+                bondRecord = bondRecord,
+                pairedAtMillis = pairedAtMillis,
                 onPairTapped = { navController.navigate(NavRoutes.PAIR) },
+                onRevokeTapped = onRevoke,
+                onDiagnosticTapped = { navController.navigate(NavRoutes.DIAGNOSTIC) },
             )
+        }
+        composable(NavRoutes.DIAGNOSTIC) {
+            DiagnosticRoute()
         }
         composable(NavRoutes.PAIR) {
             // Construct the production dependency graph for the pairing
             // ViewModel. The factory is created once per route entry; on
             // back-navigation Compose disposes the entry and the ViewModel
-            // is GCed. PairBackend is a no-op stub for S-016 because the
-            // real BT stack wiring lands in S-018; the rest is real prod.
+            // is GCed. The CDM-driven pair-mode scanner is hoisted from
+            // the Activity so its [ActivityResultLauncher] survives
+            // configuration changes.
             val context = activity.applicationContext
-            val factory = remember(context) { PairingViewModelFactoryHolder.build(context) }
+            val factory = remember(context, cdmPairScanner) {
+                PairingViewModelFactoryHolder.build(context, cdmPairScanner)
+            }
             val viewModel: PairingViewModel = viewModel(factory = factory)
             val state by viewModel.state.collectAsState()
             PairingScreen(
@@ -318,11 +693,88 @@ private fun SyauthApp(
                 ApproveRoute(activity = activity, payload = approvePayload, bondRecord = bondRecord)
             }
         }
+        composable(NavRoutes.HISTORY) {
+            // S-018: per-transaction history view. Reads the last 50
+            // records from `ChallengeHistoryDao` and renders them
+            // descending by timestamp.
+            HistoryRoute(filesDir = activity.filesDir)
+        }
     }
     // Side-effect: when the activity receives a fresh approve payload
     // (cold-start or via onNewIntent), navigate to the approve route.
     NavigateOnApprovePayload(navController = navController, payload = approvePayload)
+    NavigateOnHistoryDeepLink(navController = navController, intent = activity.intent)
 }
+
+/**
+ * S-018: when the activity is launched (or re-launched via
+ * `onNewIntent`) with a `syauth://history` deep link, navigate to
+ * the HISTORY route. Mutually exclusive with the approve deep-link
+ * via [parseHistoryDeepLink].
+ */
+@Composable
+private fun NavigateOnHistoryDeepLink(
+    navController: NavHostController,
+    intent: Intent?,
+) {
+    if (!parseHistoryDeepLink(intent)) return
+    androidx.compose.runtime.LaunchedEffect(intent) {
+        val opts = navOptions {
+            launchSingleTop = true
+            popUpTo(NavRoutes.HOME) { inclusive = false }
+        }
+        navController.navigate(NavRoutes.HISTORY, opts)
+    }
+}
+
+/**
+ * S-018: HISTORY route composable. Reads the most recent
+ * [HISTORY_DISPLAY_LIMIT] records from a `filesDir`-backed
+ * [ChallengeHistoryDao] and renders them as a `LazyColumn`. The
+ * route is read-only; no filtering, sorting, or paging affordances.
+ */
+@Composable
+internal fun HistoryRoute(filesDir: java.io.File) {
+    val records by produceState(initialValue = emptyList<ChallengeHistoryRecord>(), filesDir) {
+        value = runCatching {
+            ChallengeHistoryDao(filesDir = filesDir).recent(HISTORY_DISPLAY_LIMIT)
+        }.getOrDefault(emptyList())
+    }
+    androidx.compose.foundation.lazy.LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(HISTORY_ROUTE_PADDING_DP.dp)
+            .semantics { testTag = HISTORY_ROUTE_TEST_TAG },
+    ) {
+        items(records) { record ->
+            HistoryRowCard(record)
+        }
+    }
+}
+
+@Composable
+private fun HistoryRowCard(record: ChallengeHistoryRecord) {
+    Column(modifier = Modifier.padding(vertical = HISTORY_ROW_VERTICAL_PADDING_DP.dp)) {
+        Text(text = "${record.outcome} by ${record.hostname}")
+        Text(
+            text = "peer ${record.peerIdShort}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            text = formatPairedAt(record.timestampMs),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+/** Test tag attached to the HISTORY route's outer `LazyColumn` (S-018). */
+internal const val HISTORY_ROUTE_TEST_TAG: String = "syauth.history.lazy"
+
+/** Outer padding for the HISTORY route. */
+private const val HISTORY_ROUTE_PADDING_DP: Int = 16
+
+/** Vertical padding between consecutive history rows. */
+private const val HISTORY_ROW_VERTICAL_PADDING_DP: Int = 8
 
 @Composable
 private fun NavigateOnApprovePayload(
@@ -345,9 +797,15 @@ private fun ApproveRoute(
     payload: ApprovePayload,
     bondRecord: BondRecord?,
 ) {
-    val seed = bondRecord?.phoneSigningKeySeed ?: ByteArray(ED25519_SEED_LEN)
-    val bondKey = bondRecord?.bondKey ?: ByteArray(ED25519_SEED_LEN)
+    val bondKey = bondRecord?.bondKey ?: ByteArray(BOND_KEY_BYTES_LEN)
+    val keystoreAlias = bondRecord?.keystoreAlias ?: ""
     val viewModel = remember(payload, bondRecord) {
+        // DEV-002: wire signing through the Keystore-backed
+        // [KeystoreFrameSigner] via the UniFFI `FrameSigner` callback.
+        // The private Ed25519 key never leaves the Keystore enclave;
+        // every sign requires a fresh BiometricPrompt unlock per
+        // SPEC §3.2 D6.
+        val frameSigner = KeystoreFrameSigner(alias = keystoreAlias)
         ApproveViewModel(
             hostname = payload.hostname,
             challengeFrame = payload.challengeBytes,
@@ -357,18 +815,7 @@ private fun ApproveRoute(
                 activity = activity,
                 hostname = payload.hostname,
             ),
-            // GAP: DEV-002 — the Ed25519 seed reaches this provider
-            // as plaintext ByteArray from the bond record on disk.
-            // SPEC §3.2 D6 mandates an Android Keystore STRONGBOX-
-            // backed signing handle gated by
-            // `setUserAuthenticationRequired(true)`. Closure
-            // condition: `InMemorySigningKeyProvider` has no
-            // production callers; signing flows through a UniFFI
-            // entry point that takes a Keystore `KeyEntry` ref + the
-            // frame bytes and never sees the raw seed. See
-            // `docs/known-gaps.md` row DEV-002.
-            signingKeyProvider = InMemorySigningKeyProvider(seed),
-            wireSigner = UniffiWireSigner(),
+            wireSigner = UniffiWireSigner(frameSigner = frameSigner),
             responseSender = GattResponseSender(peerId = payload.peerId),
         )
     }
@@ -384,26 +831,166 @@ private fun ApproveRoute(
     )
 }
 
-/** Ed25519 seed length, named so we don't sprinkle the literal `32`. */
-private const val ED25519_SEED_LEN: Int = 32
+/** Bond-key byte length (32). Pulled out so the literal does not roam. */
+private const val BOND_KEY_BYTES_LEN: Int = 32
 
 /** Logcat tag for the runtime-permission flow. */
 private const val PERMISSION_LOG_TAG: String = "syauth.permission"
 
+/** Surfaced as a toast when no bond is yet present (pair has not run). */
+private const val NO_BOND_TOAST: String = "No syauth bond yet — run `syauth pair` on the desktop and tap Pair in the app"
+
 /**
- * The three runtime BLE permissions that Android 12+ (API 31+) enforces
- * for a `connectedDevice` foreground service. Any one grant satisfies
- * the platform's start-foreground gate; we request all three so the
- * UX is one dialog regardless of which the OS counts.
+ * Runtime BLE permission Android 12+ (API 31+) enforces for the
+ * phone's connect role. After the DEV-001 CDM pivot, `BLUETOOTH_SCAN`
+ * is no longer required because the OS picker
+ * (`CompanionDeviceManager.associate`) runs the scan under system
+ * privileges; only the post-bond GATT client + bond-state listener
+ * paths still need `BLUETOOTH_CONNECT`.
  */
 private val BLUETOOTH_RUNTIME_PERMISSIONS: Array<String> = arrayOf(
     Manifest.permission.BLUETOOTH_CONNECT,
-    Manifest.permission.BLUETOOTH_ADVERTISE,
-    Manifest.permission.BLUETOOTH_SCAN,
 )
 
 @Composable
-private fun HomeRoute(onPairTapped: () -> Unit) {
+private fun HomeRoute(
+    bondRecord: BondRecord?,
+    pairedAtMillis: Long,
+    onPairTapped: () -> Unit,
+    onRevokeTapped: () -> Unit,
+    onDiagnosticTapped: () -> Unit,
+) {
+    val revokeDialogState = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val revokeDialogOpen = revokeDialogState.value
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+    ) {
+        androidx.compose.material3.TextButton(
+            onClick = onDiagnosticTapped,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .semantics { testTag = HOME_DIAGNOSTIC_BUTTON_TAG },
+        ) {
+            Text(text = "?")
+        }
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (bondRecord == null) {
+                UnpairedHomeBody(onPairTapped = onPairTapped)
+            } else {
+                PairedHomeBody(
+                    bondRecord = bondRecord,
+                    pairedAtMillis = pairedAtMillis,
+                    onRepairTapped = onPairTapped,
+                    onRevokeTapped = { revokeDialogState.value = true },
+                )
+            }
+        }
+    }
+    if (revokeDialogOpen && bondRecord != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { revokeDialogState.value = false },
+            title = { Text(text = "Revoke pairing with ${bondRecord.hostName}?") },
+            text = {
+                Text(
+                    text = "This removes the bond on the phone and clears the Keystore key. " +
+                        "The system Bluetooth bond is not touched; remove it from BT Settings " +
+                        "if you want a full re-pair.",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    revokeDialogState.value = false
+                    onRevokeTapped()
+                }) {
+                    Text(text = "Revoke")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { revokeDialogState.value = false }) {
+                    Text(text = "Cancel")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun UnpairedHomeBody(onPairTapped: () -> Unit) {
+    Text(text = "Not paired with a computer yet.")
+    Spacer(modifier = Modifier.height(24.dp))
+    Button(
+        onClick = onPairTapped,
+        modifier = Modifier.semantics { testTag = HOME_PAIR_BUTTON_TAG },
+    ) {
+        Text(text = "Pair")
+    }
+}
+
+@Composable
+private fun PairedHomeBody(
+    bondRecord: BondRecord,
+    pairedAtMillis: Long,
+    onRepairTapped: () -> Unit,
+    onRevokeTapped: () -> Unit,
+) {
+    Text(text = "Paired with", style = MaterialTheme.typography.bodyMedium)
+    Text(text = bondRecord.hostName, style = MaterialTheme.typography.headlineSmall)
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(text = "peer_id: ${truncatedPeerId(bondRecord.peerId)}")
+    if (pairedAtMillis > 0L) {
+        Text(text = "paired:  ${formatPairedAt(pairedAtMillis)}")
+    }
+    Spacer(modifier = Modifier.height(24.dp))
+    androidx.compose.foundation.layout.Row(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Button(
+            onClick = onRepairTapped,
+            modifier = Modifier.semantics { testTag = HOME_REPAIR_BUTTON_TAG },
+        ) {
+            Text(text = "Re-pair")
+        }
+        androidx.compose.material3.OutlinedButton(
+            onClick = onRevokeTapped,
+            modifier = Modifier.semantics { testTag = HOME_REVOKE_BUTTON_TAG },
+        ) {
+            Text(text = "Revoke")
+        }
+    }
+}
+
+/**
+ * Truncate the BLAKE3-derived 32-char `peer_id` to its first
+ * [PEER_ID_DISPLAY_PREFIX_LEN] hex characters plus an ellipsis. Keeps
+ * the home card readable while still giving the operator enough
+ * collision space (8 hex = 32 bits) to spot a swapped peer.
+ */
+private fun truncatedPeerId(peerId: String): String =
+    if (peerId.length <= PEER_ID_DISPLAY_PREFIX_LEN) {
+        peerId
+    } else {
+        peerId.substring(0, PEER_ID_DISPLAY_PREFIX_LEN) + PEER_ID_TRUNCATION_SUFFIX
+    }
+
+/**
+ * Format `lastModified` milliseconds (file mtime of the bond record)
+ * as `yyyy-MM-dd HH:mm` in the device's local zone. The schema does
+ * not carry a paired-at field; the file's mtime stands in.
+ */
+private fun formatPairedAt(epochMillis: Long): String {
+    val fmt = java.text.SimpleDateFormat(PAIRED_AT_FORMAT_PATTERN, java.util.Locale.US)
+    return fmt.format(java.util.Date(epochMillis))
+}
+
+/** Route hosting the UniFFI smoke-test surface (`HelloWorldTest`). */
+@Composable
+private fun DiagnosticRoute() {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -412,13 +999,6 @@ private fun HomeRoute(onPairTapped: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         OobScreen()
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(
-            onClick = onPairTapped,
-            modifier = Modifier.semantics { testTag = HOME_PAIR_BUTTON_TAG },
-        ) {
-            Text(text = "Pair")
-        }
     }
 }
 
@@ -458,7 +1038,10 @@ internal fun OobScreen() {
  * `CompanionDeviceManager.associate()`.
  */
 private object PairingViewModelFactoryHolder {
-    fun build(context: Context): androidx.lifecycle.ViewModelProvider.Factory =
+    fun build(
+        context: Context,
+        cdmPairScanner: AndroidCdmPairCompanionScanner?,
+    ): androidx.lifecycle.ViewModelProvider.Factory =
         object : androidx.lifecycle.ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : androidx.lifecycle.ViewModel> create(
@@ -482,42 +1065,49 @@ private object PairingViewModelFactoryHolder {
                     // silently break.
                     com.sy.syauth.android.pair.NoopCompanionAssociator()
                 }
-                return PairingViewModel(
-                    backend = StubPairBackend(),
+                val keystoreGenerator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    com.sy.syauth.android.pair.impl.AndroidKeystoreKeyGenerator()
+                } else {
+                    null
+                }
+                val gattExchange = adapter?.let {
+                    com.sy.syauth.android.pair.impl.AndroidPairGattExchange(context = context, adapter = it)
+                }
+                val backend = RealPairBackend(
+                    context = context,
+                    adapter = adapter,
+                    companionScanner = cdmPairScanner,
+                    gattExchange = gattExchange,
+                    pairingReceiverRegistrar = com.sy.syauth.android.pair.impl.ContextReceiverRegistrar(context),
+                    bondStateReceiverRegistrar = com.sy.syauth.android.pair.impl.ContextReceiverRegistrar(context),
+                    clock = com.sy.syauth.android.pair.impl.SystemPairClock(),
+                    sessionUuidLookup = com.sy.syauth.android.pair.impl.UniffiPairSessionUuidLookup(),
+                    bondKeyDeriver = com.sy.syauth.android.pair.impl.HkdfPairBondKeyDeriver(),
+                    keystoreKeyGenerator = keystoreGenerator,
+                )
+                val vm = PairingViewModel(
+                    backend = backend,
                     oobCalculator = UniffiOobCalculator(),
                     bondPersister = DiskBondPersister(
                         bondStore = BondStore(context.filesDir),
                     ),
                     bondRemover = ReflectionBondRemover(adapter = adapter),
                     companionAssociator = associator,
-                ) as T
+                )
+                // DEV-001 re-march: backend → ViewModel callback edge. The
+                // bond-state receiver inside `backend` resolves a
+                // [LescResult]; this callback hands it to the ViewModel so
+                // the state machine advances without backend ↔ ViewModel
+                // type coupling.
+                backend.setOnLescResultCallback { result -> vm.onLescResult(result) }
+                // DEV-001 (CDM pivot): the CDM scanner's picker callback
+                // surfaces the picked peer through the backend's
+                // onPeerPickedCallback. Route it into the ViewModel so
+                // the state machine transitions Scanning → LescNegotiating
+                // exactly once per pair attempt.
+                backend.setOnPeerPickedCallback { peer -> vm.onPeerPicked(peer) }
+                backend.setOnScanFailedCallback { _ -> vm.onCancelTapped() }
+                return vm as T
             }
         }
 }
-
-/**
- * Placeholder [PairBackend] — the production BLE-scan/LESC-bond
- * wiring is out of scope for S-018 (which delivers the
- * CompanionDeviceService + GATT server background bridge instead).
- * The stub keeps the screen from crashing on launch but does not
- * advance past `Scanning`.
- *
- * Once a real backend is in place, the OOB-yes happy path will run
- * through the [com.sy.syauth.android.pair.impl.RealCompanionAssociator]
- * the S-018 factory now installs.
- */
-private class StubPairBackend : PairBackend {
-    override fun startScan() = Unit
-    override fun stopScan() = Unit
-    override fun pickPeer(peer: PeerHandle): PickPeerResult =
-        PickPeerResult.Failed("pairing backend not yet implemented (post-S-018)")
-    override fun awaitLescResult(): LescResult =
-        LescResult.Failed("pairing backend not yet implemented (post-S-018)")
-}
-
-// The previous `InMemoryBondPersister` no-op was replaced by the
-// disk-backed [com.sy.syauth.android.provision.DiskBondPersister].
-// GAP: DEV-001 — that persister currently writes a stub provision
-// record into the BondStore. When LESC pairing lands (S-016 real
-// backend), the persister writes the bond_key derived from the
-// LE Secure Connections handshake instead. See `docs/known-gaps.md`.

@@ -28,15 +28,56 @@
 use std::{
     fs,
     io::{self, BufRead, Write},
-    path::PathBuf,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
+use serde::Serialize;
 use syauth_core::BondStore;
+use syauth_presenced::{PeerStatus, Request, Response, read_frame_blocking, write_frame_blocking};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::pair::{DEFAULT_ADAPTER_NAME, DEFAULT_BOND_DIR, bonds_path};
+
+/// Poll cadence applied to `--watch`. Pinned per S-017 prompt
+/// ("polls every 1 s and redraws"). One second is short enough to
+/// surface a fresh challenge within one redraw, long enough that a
+/// loaded daemon does not see >1 Hz status traffic.
+pub const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// ANSI escape sequence to clear the screen and move the cursor home.
+/// Emitted at the top of every `--watch` redraw so the table is
+/// always rendered in the same position.
+pub const WATCH_CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
+
+/// `connect()` + Status RPC timeout. Mirrors the S-016
+/// `doctor::DAEMON_CONNECT_TIMEOUT` so the two subcommands share an
+/// SLA on the daemon-down latency budget.
+pub const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Read budget on the daemon's `Response::Status` reply. Same SLA
+/// as the S-016 doctor.
+pub const DAEMON_STATUS_READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Width in characters of the short rotating-UUID prefix the text
+/// renderer prints in the `uuid` column. Matches
+/// `syauth_presenced::SHORT_UUID_HEX_LEN = 8` so a
+/// `journalctl -t syauth-presenced | grep uuid=<short>` lookup
+/// works end-to-end.
+pub const SHORT_UUID_HEX_LEN: usize = 8;
+
+/// Default Unix-socket basename under `${XDG_RUNTIME_DIR}/syauth/`.
+/// Matches `syauth_presenced::DEFAULT_SOCKET_BASENAME` so the CLI
+/// and the daemon agree on the default socket path.
+const DEFAULT_SOCKET_BASENAME: &str = "syauth/auth.sock";
 
 /// File name (within `--bond-dir`) where the PAM module writes
 /// per-unlock outcome lines. Defined here so a future test in
@@ -81,6 +122,23 @@ pub struct StatusOpts {
     /// `<bond-dir>/last.log`. Tests inject a fixture path.
     #[arg(long)]
     pub last_log: Option<PathBuf>,
+
+    /// Override the daemon Unix-socket path. If unset, defaults to
+    /// `${XDG_RUNTIME_DIR}/syauth/auth.sock` (or
+    /// `/run/user/<uid>/syauth/auth.sock` when env is missing).
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+
+    /// Poll the daemon every `WATCH_INTERVAL` and redraw the
+    /// status table. Exits cleanly on SIGINT.
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Emit the daemon section as a typed JSON object via
+    /// `serde_json::to_string_pretty`. Same data, different surface
+    /// for tooling (waybar pill etc).
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Typed errors produced by [`run_status`].
@@ -93,6 +151,60 @@ pub enum StatusError {
     /// Stdio I/O error.
     #[error("status i/o error: {0}")]
     Io(#[from] io::Error),
+
+    /// `--json` encode failure. Effectively unreachable — the
+    /// schema is total — but kept as a typed variant for symmetry.
+    #[error("status json encode error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Daemon-reachability outcome. Mirrors `doctor::DaemonState` so the
+/// two subcommands share a reason vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum DaemonProbeState {
+    /// `connect()` + `Request::Status` succeeded within the
+    /// timeout; the daemon's per-peer rows + boot wall-clock time
+    /// are carried in.
+    Up {
+        /// Boot wall-clock time the daemon reported. Serialized as
+        /// epoch seconds on the JSON path for non-Rust consumers.
+        #[serde(with = "epoch_seconds")]
+        started_at: SystemTime,
+        /// Per-peer liveness rows the orchestrator emitted.
+        peers: Vec<PeerStatus>,
+    },
+    /// Probe failed. `reason` is a short greppable token
+    /// (`socket-missing`, `connect-refused`, `frame-error`,
+    /// `timeout`).
+    Down {
+        /// One-word reason token; never includes whitespace.
+        reason: String,
+    },
+}
+
+/// Typed JSON report shape consumed by the waybar pill in the `sy`
+/// repo's roadmap. Field renames are a breaking change requiring a
+/// snapshot accept + a changelog row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CliStatusReport {
+    /// Resolved daemon socket path.
+    pub daemon_socket: PathBuf,
+    /// Daemon-reachability outcome (includes per-peer rows on Up).
+    pub daemon: DaemonProbeState,
+}
+
+mod epoch_seconds {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde::{Serialize, Serializer};
+
+    /// Serialize a `SystemTime` as whole epoch seconds. Times before
+    /// the epoch encode as `0` — unreachable on a healthy clock.
+    pub(super) fn serialize<S: Serializer>(value: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
+        let secs = value.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
+        secs.serialize(serializer)
+    }
 }
 
 /// Three-valued adapter state. `Missing` is the soft-fail path when
@@ -347,19 +459,244 @@ pub async fn gather_status_async(opts: &StatusOpts, probe: &dyn AsyncAdapterProb
 }
 
 /// Drive `syauth status` end-to-end against the production
-/// [`BluerAdapterProbe`].
+/// [`BluerAdapterProbe`]. Honors `--watch`, `--json`, and the
+/// daemon-socket probe.
 ///
 /// # Errors
 ///
 /// Returns [`StatusError`] on bond-store load failure or unexpected I/O.
-/// Missing adapter / missing `last.log` are NOT errors.
+/// Missing adapter / missing `last.log` are NOT errors. A
+/// daemon-down probe is NOT an error (folds into a `daemon=down:
+/// <reason>` line).
 pub async fn run_status(opts: &StatusOpts) -> Result<(), StatusError> {
+    if opts.watch && !opts.json {
+        return run_status_watch_loop(opts).await;
+    }
     let probe = BluerAdapterProbe;
-    let snapshot = gather_status_async(opts, &probe).await?;
+    render_one_shot(opts, &probe).await
+}
+
+/// Render a single `status` snapshot. Used by the one-shot path and
+/// by each `--watch` iteration.
+async fn render_one_shot(opts: &StatusOpts, probe: &dyn AsyncAdapterProbe) -> Result<(), StatusError> {
+    let cli_report = build_cli_report(opts);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
+    if opts.json {
+        write_json_report(&mut writer, &cli_report)?;
+        return Ok(());
+    }
+    write_daemon_section(&mut writer, &cli_report)?;
+    let snapshot = gather_status_async(opts, probe).await?;
     render_status_to(&mut writer, &snapshot)
 }
+
+/// Build the typed CLI status report (daemon section + per-peer
+/// rows). Probes the daemon socket synchronously via the same
+/// `read_frame_blocking` / `write_frame_blocking` helpers the PAM
+/// module uses; the call is fenced by [`DAEMON_CONNECT_TIMEOUT`].
+pub fn build_cli_report(opts: &StatusOpts) -> CliStatusReport {
+    let socket = opts.socket.clone().unwrap_or_else(default_socket_path);
+    let daemon = probe_daemon(&socket);
+    CliStatusReport {
+        daemon_socket: socket,
+        daemon,
+    }
+}
+
+/// Compose the default daemon socket path:
+/// `${XDG_RUNTIME_DIR}/syauth/auth.sock`, with the
+/// `/run/user/<uid>/` fallback when env is unset.
+fn default_socket_path() -> PathBuf {
+    let base = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(format!("/run/user/{}", nix::unistd::geteuid().as_raw())),
+    };
+    base.join(DEFAULT_SOCKET_BASENAME)
+}
+
+/// Probe the daemon by connecting to `socket` and exchanging one
+/// `Request::Status` / `Response::Status` pair. Every failure path
+/// collapses into a `DaemonProbeState::Down { reason }` so the
+/// status command itself never errors out on daemon-down.
+fn probe_daemon(socket: &Path) -> DaemonProbeState {
+    if !socket.exists() {
+        return DaemonProbeState::Down {
+            reason: "socket-missing".to_owned(),
+        };
+    }
+    let mut stream = match UnixStream::connect(socket) {
+        Ok(s) => s,
+        Err(err) => {
+            return DaemonProbeState::Down {
+                reason: connect_error_reason(&err),
+            };
+        }
+    };
+    if let Err(err) = stream.set_read_timeout(Some(DAEMON_STATUS_READ_TIMEOUT)) {
+        return DaemonProbeState::Down {
+            reason: format!("read-timeout-setup-failed: {}", err.kind()),
+        };
+    }
+    if let Err(err) = stream.set_write_timeout(Some(DAEMON_CONNECT_TIMEOUT)) {
+        return DaemonProbeState::Down {
+            reason: format!("write-timeout-setup-failed: {}", err.kind()),
+        };
+    }
+    if let Err(err) = write_frame_blocking(&mut stream, &Request::Status) {
+        return DaemonProbeState::Down {
+            reason: format!("frame-error: {err}"),
+        };
+    }
+    match read_frame_blocking::<_, Response>(&mut stream) {
+        Ok(Response::Status { peers, started_at }) => DaemonProbeState::Up { started_at, peers },
+        Ok(_) => DaemonProbeState::Down {
+            reason: "unexpected-response".to_owned(),
+        },
+        Err(err) => DaemonProbeState::Down {
+            reason: format!("frame-error: {err}"),
+        },
+    }
+}
+
+/// Map a `std::io::Error` from the `connect()` call to the same
+/// reason-token vocabulary the S-016 doctor uses.
+fn connect_error_reason(err: &io::Error) -> String {
+    match err.kind() {
+        io::ErrorKind::NotFound => "socket-missing".to_owned(),
+        io::ErrorKind::ConnectionRefused => "connect-refused".to_owned(),
+        io::ErrorKind::PermissionDenied => "permission-denied".to_owned(),
+        io::ErrorKind::TimedOut => "timeout".to_owned(),
+        other => format!("connect-error: {other:?}"),
+    }
+}
+
+/// Render the daemon section (header + per-peer table) of the
+/// status output. Always emits at least the `daemon=` header line
+/// so a daemon-down case is never a silent empty section.
+pub fn write_daemon_section(writer: &mut dyn Write, report: &CliStatusReport) -> Result<(), StatusError> {
+    match &report.daemon {
+        DaemonProbeState::Up { started_at, peers } => {
+            let ts = format_rfc3339(*started_at);
+            writeln!(writer, "daemon=up started_at={ts}")?;
+            writeln!(
+                writer,
+                "peer_id                                                              last_challenge  last_connect    uuid      in_flight"
+            )?;
+            for peer in peers {
+                writeln!(
+                    writer,
+                    "{:<68}  {:<14}  {:<14}  {:<8}  {}",
+                    peer.peer_id,
+                    format_ms_ago(peer.last_challenge_ms_ago),
+                    format_ms_ago(peer.last_connect_ms_ago),
+                    short_uuid_hex(&peer.current_session_uuid),
+                    peer.in_flight_challenges,
+                )?;
+            }
+        }
+        DaemonProbeState::Down { reason } => {
+            writeln!(writer, "daemon=down: {reason}")?;
+        }
+    }
+    Ok(())
+}
+
+/// JSON renderer for the daemon section. Used by `--json` mode.
+pub fn write_json_report(writer: &mut dyn Write, report: &CliStatusReport) -> Result<(), StatusError> {
+    let s = serde_json::to_string_pretty(report)?;
+    writer.write_all(s.as_bytes())?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Render a `SystemTime` as an RFC3339 wall-clock token. Falls back
+/// to `<epoch>+<seconds>` if the value pre-dates the unix epoch
+/// (unreachable on a healthy clock).
+fn format_rfc3339(t: SystemTime) -> String {
+    let secs = match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(_) => return "epoch+0".to_owned(),
+    };
+    let secs_i64 = i64::try_from(secs).unwrap_or(i64::MAX);
+    match OffsetDateTime::from_unix_timestamp(secs_i64) {
+        Ok(dt) => dt.format(&Rfc3339).unwrap_or_else(|_| format!("epoch+{secs}")),
+        Err(_) => format!("epoch+{secs}"),
+    }
+}
+
+/// Render an `Option<u64>` millisecond age as `<X.Ys ago>` or
+/// `never`. Seconds resolution to one decimal so a sub-second age
+/// surfaces as `0.3s ago`.
+fn format_ms_ago(ms: Option<u64>) -> String {
+    match ms {
+        Some(m) => {
+            let secs = m as f64 / 1000.0;
+            format!("{secs:.1}s ago")
+        }
+        None => "never".to_owned(),
+    }
+}
+
+/// Render the leading [`SHORT_UUID_HEX_LEN`] hex chars of `uuid`,
+/// matching the orchestrator's `short_hex` rotation-audit format.
+fn short_uuid_hex(uuid: &uuid::Uuid) -> String {
+    let s = uuid.simple().to_string();
+    s.chars().take(SHORT_UUID_HEX_LEN).collect()
+}
+
+/// `--watch` polling loop. Polls every `WATCH_INTERVAL`, redrawing
+/// via `WATCH_CLEAR_SCREEN`. Exits cleanly on SIGINT (via an
+/// `AtomicBool` toggled by a one-shot signal handler).
+async fn run_status_watch_loop(opts: &StatusOpts) -> Result<(), StatusError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    install_sigint_handler(Arc::clone(&stop));
+    let probe = BluerAdapterProbe;
+    while !stop.load(Ordering::SeqCst) {
+        {
+            let mut writer = io::stdout().lock();
+            writer.write_all(WATCH_CLEAR_SCREEN.as_bytes())?;
+        }
+        render_one_shot(opts, &probe).await?;
+        if wait_or_break(&stop, WATCH_INTERVAL) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Install a one-shot SIGINT handler that flips `stop` to `true`.
+/// A no-op on a second invocation per process (the `ctrlc` crate
+/// docs do not exist; we use a tokio signal stream instead).
+fn install_sigint_handler(stop: Arc<AtomicBool>) {
+    thread::spawn(move || {
+        if let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT])
+            && signals.forever().next().is_some()
+        {
+            stop.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
+/// Sleep for `dur` (in `WATCH_SLEEP_TICK` slices) so a SIGINT
+/// flipping `stop` interrupts the wait within one tick. Returns
+/// `true` if `stop` flipped during the wait.
+fn wait_or_break(stop: &AtomicBool, dur: Duration) -> bool {
+    let deadline = std::time::Instant::now() + dur;
+    while std::time::Instant::now() < deadline {
+        if stop.load(Ordering::SeqCst) {
+            return true;
+        }
+        thread::sleep(WATCH_SLEEP_TICK);
+    }
+    stop.load(Ordering::SeqCst)
+}
+
+/// Granularity of the `--watch` SIGINT poll. 50 ms means a SIGINT
+/// flipping the `AtomicBool` interrupts a sleeping watch within one
+/// tick, while keeping the wakeup rate well under any plausible
+/// terminal redraw budget.
+const WATCH_SLEEP_TICK: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Tests — library-level. Integration test lives in tests/cli.rs.
@@ -514,6 +851,9 @@ mod tests {
             adapter: "test-adapter".to_owned(),
             bond_dir,
             last_log: None,
+            socket: None,
+            watch: false,
+            json: false,
         };
         let probe = FixedProbe(AdapterState::Down);
         let snap = gather_status(&opts, &probe).expect("gather");
@@ -530,6 +870,9 @@ mod tests {
             adapter: "hci0".to_owned(),
             bond_dir: PathBuf::from("/tmp/foo"),
             last_log: None,
+            socket: None,
+            watch: false,
+            json: false,
         };
         assert_eq!(
             effective_last_log_path(&opts),
@@ -543,6 +886,9 @@ mod tests {
             adapter: "hci0".to_owned(),
             bond_dir: PathBuf::from("/tmp/foo"),
             last_log: Some(PathBuf::from("/tmp/elsewhere/last.log")),
+            socket: None,
+            watch: false,
+            json: false,
         };
         assert_eq!(effective_last_log_path(&opts), PathBuf::from("/tmp/elsewhere/last.log"));
     }
@@ -552,5 +898,52 @@ mod tests {
         assert_eq!(AdapterState::Powered.as_token(), "Powered");
         assert_eq!(AdapterState::Down.as_token(), "Down");
         assert_eq!(AdapterState::Missing.as_token(), "Missing");
+    }
+
+    #[test]
+    fn watch_interval_is_one_second() {
+        // S-017 prompt: "polls every 1 s and redraws". The named
+        // constant is the canonical source of truth.
+        assert_eq!(WATCH_INTERVAL, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn format_ms_ago_renders_never_for_none() {
+        assert_eq!(format_ms_ago(None), "never");
+    }
+
+    #[test]
+    fn format_ms_ago_renders_one_decimal_seconds() {
+        assert_eq!(format_ms_ago(Some(3_200)), "3.2s ago");
+        assert_eq!(format_ms_ago(Some(0)), "0.0s ago");
+    }
+
+    #[test]
+    fn short_uuid_hex_truncates_to_eight_chars() {
+        let uuid = uuid::Uuid::from_bytes([0xab; 16]);
+        let s = short_uuid_hex(&uuid);
+        assert_eq!(s.len(), SHORT_UUID_HEX_LEN);
+        assert_eq!(s, "abababab");
+    }
+
+    #[test]
+    fn write_daemon_section_emits_down_token_on_daemon_down() {
+        let report = CliStatusReport {
+            daemon_socket: PathBuf::from("/tmp/x.sock"),
+            daemon: DaemonProbeState::Down {
+                reason: "socket-missing".to_owned(),
+            },
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut cur = Cursor::new(&mut buf);
+        write_daemon_section(&mut cur, &report).expect("render");
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.contains("daemon=down: socket-missing"));
+    }
+
+    #[test]
+    fn connect_error_reason_maps_not_found_to_socket_missing() {
+        let err = io::Error::new(io::ErrorKind::NotFound, "x");
+        assert_eq!(connect_error_reason(&err), "socket-missing");
     }
 }

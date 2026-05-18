@@ -1,0 +1,16 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"status\", \"--help\"])"
+---
+Print adapter state, advertising state, bond count, and the most recent unlock outcome. Read-only — never writes to the host
+
+Usage: syauth status [OPTIONS]
+
+Options:
+      --adapter <ADAPTER>    BlueZ adapter id (e.g. `hci0`) [default: hci0]
+      --bond-dir <BOND_DIR>  Directory holding the bonds file. Defaults to SPEC's `/var/lib/syauth/`. Tests inject a tempdir [default: /var/lib/syauth]
+      --last-log <LAST_LOG>  Path to the rolling unlock log. Defaults to `<bond-dir>/last.log`. Tests inject a fixture path
+      --socket <SOCKET>      Override the daemon Unix-socket path. If unset, defaults to `${XDG_RUNTIME_DIR}/syauth/auth.sock` (or `/run/user/<uid>/syauth/auth.sock` when env is missing)
+      --watch                Poll the daemon every `WATCH_INTERVAL` and redraw the status table. Exits cleanly on SIGINT
+      --json                 Emit the daemon section as a typed JSON object via `serde_json::to_string_pretty`. Same data, different surface for tooling (waybar pill etc)
+  -h, --help                 Print help

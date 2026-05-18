@@ -38,7 +38,6 @@ class ApproveScreenTest {
             bondKey = ByteArray(SEED_LEN) { 0x02 },
             keystoreSigner = TestKeystoreSigner(),
             biometricPresenter = NoOpBiometricPresenter,
-            signingKeyProvider = InMemorySigningKeyProvider(ByteArray(SEED_LEN) { 0x01 }),
             wireSigner = NoOpWireSigner,
             responseSender = NoOpResponseSender,
             timeoutMillis = LONG_TIMEOUT_MILLIS,
@@ -108,7 +107,7 @@ private object NoOpBiometricPresenter : BiometricPresenter {
 }
 
 private object NoOpWireSigner : WireSigner {
-    override suspend fun signWire(bondKey: ByteArray, seed: ByteArray, frameBytes: ByteArray): WireSignResult =
+    override suspend fun signWire(bondKey: ByteArray, frameBytes: ByteArray): WireSignResult =
         WireSignResult.Failure("test-no-op")
 }
 

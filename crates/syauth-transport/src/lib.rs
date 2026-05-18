@@ -1,5 +1,5 @@
 //! `syauth-transport` — the seam between the `syauth-core` protocol and the
-//! Bluetooth (or, in v0.2, LAN) layer that actually moves bytes.
+//! Bluetooth layer that moves bytes.
 //!
 //! S-007 ships:
 //!
@@ -32,22 +32,30 @@
 #![deny(missing_docs)]
 
 pub mod bluez;
+pub mod bluez_advertise;
 pub mod error;
 pub mod mock;
+pub mod peripheral;
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 pub use bluez::{
     BOND_KEY_BYTES, BlueZBtPeer, DEFAULT_ADAPTER_NAME, FRAGMENT_HEADER_LEN, FRAGMENT_MORE_BIT, FRAGMENT_PAYLOAD_MAX, HKDF_INFO_SESSION_V1,
-    MAX_BLE_MTU, PairingState, SECONDS_PER_MINUTE, SESSION_UUID_BYTES, SESSION_UUID_ROTATION_INTERVAL, reassemble, session_uuid_for,
+    MAX_BLE_MTU, PAIR_PUBKEY_LEN, PairingState, SECONDS_PER_MINUTE, SESSION_UUID_BYTES, SESSION_UUID_ROTATION_INTERVAL,
+    SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID, SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID, SYAUTH_PAIR_SERVICE_UUID, connect_pair_service, reassemble,
+    session_uuid_for,
 };
+pub use bluez_advertise::{ADVERTISE_LOCAL_NAME, BluerAdvertiser};
 pub use error::TransportError;
 pub use mock::{
     GOLDEN_PAYLOAD_XOR_MASK, GOLDEN_RECV_TIMEOUT, GOLDEN_ROUNDTRIP_BUDGET, MOCK_CHAN_CAP, MOCK_SLOW_DELAY, MockBtPeer, MockScenario,
     REORDERED_BUFFER_DEPTH, REPLAY_DEFAULT_DUPLICATES, SHORT_CALLER_TIMEOUT, SLOW_DEFAULT_DELAY, TIMEOUT_BUDGET_MULT,
     WRONG_VERSION_DEFAULT,
 };
+#[cfg(any(test, feature = "test-fake"))]
+pub use peripheral::FakePeripheral;
+pub use peripheral::{BondKey, Peripheral, PeripheralError, PersistentPeripheral};
 use syauth_core::Frame;
 
 /// A Bluetooth peer the PAM module can talk to.

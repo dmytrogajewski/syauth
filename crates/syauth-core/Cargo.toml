@@ -49,6 +49,12 @@ subtle = { version = "2", default-features = false, features = ["std"] }
 # additions of `#[derive(ZeroizeOnDrop)]` on a Drop type in this module
 # do not require touching Cargo.toml again.
 zeroize = { version = "1", features = ["zeroize_derive"] }
+# DEV-001: HKDF-SHA256 used by `bond_key_from_pubkeys` to derive the 32-byte
+# shared `bond_key` from the host + phone Ed25519 pubkeys exchanged over the
+# LESC-encrypted pair channel. Same pin as `syauth-transport` so the
+# workspace resolves a single version.
+hkdf = "0.13"
+sha2 = "0.11"
 
 # S-006 secret storage — Linux kernel keyring backend (primary).
 # Only compiled on Linux because the underlying `keyctl(2)` syscalls do

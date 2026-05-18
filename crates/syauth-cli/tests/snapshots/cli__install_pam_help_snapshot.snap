@@ -1,5 +1,6 @@
 ---
 source: crates/syauth-cli/tests/cli.rs
+assertion_line: 132
 expression: "help_stdout(&[\"install-pam\", \"--help\"])"
 ---
 Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snapshot of the original
@@ -7,9 +8,27 @@ Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snaps
 Usage: syauth install-pam [OPTIONS] --service <SERVICE>
 
 Options:
-      --service <SERVICE>          PAM service to install into (e.g. `sudo`, `login`, `gdm-password`)
-      --pam-dir <PAM_DIR>          PAM service directory to modify. Defaults to `/etc/pam.d`. Tests inject a tempdir [default: /etc/pam.d]
-      --module-args <MODULE_ARGS>  Module arguments appended after the so-name. Defaults to `timeout=1200` [default: timeout=1200]
-      --so-path <SO_PATH>          Shared-object name of the PAM module. Defaults to `pam_syauth.so`. PAM resolves this against its module search path [default: pam_syauth.so]
-      --yes                        Skip the interactive confirmation prompt. Tests always pass this
-  -h, --help                       Print help
+      --service <SERVICE>
+          PAM service to install into (e.g. `sudo`, `login`, `gdm-password`)
+      --pam-dir <PAM_DIR>
+          PAM service directory to modify. Defaults to `/etc/pam.d`. Tests inject a tempdir [default: /etc/pam.d]
+      --module-args <MODULE_ARGS>
+          Module arguments appended after the so-name. Defaults to `timeout=1200` [default: timeout=8000]
+      --so-path <SO_PATH>
+          Shared-object name of the PAM module. Defaults to `pam_syauth.so`. PAM resolves this against its module search path [default: pam_syauth.so]
+      --yes
+          Skip the interactive confirmation prompt. Tests always pass this
+      --with-presenced <WITH_PRESENCED>
+          Also install the `syauth-presenced` systemd user unit (S-009). Default `true` so the PAM edit and the daemon install are bundled. Pass `--with-presenced=false` to install only the PAM line — e.g. when the daemon is managed by the host distribution [default: true] [possible values: true, false]
+      --presenced-dry-run
+          When `--with-presenced=true`, forward this flag to the bundled `install-presenced` step. Tests pass this so the bundled step does not shell out to `systemctl`
+      --presenced-unit-dir <PRESENCED_UNIT_DIR>
+          When `--with-presenced=true`, forward this directory override to the bundled `install-presenced` step. Tests pass a tempdir here
+      --presenced-from <PRESENCED_FROM>
+          When `--with-presenced=true`, forward this source-binary override to the bundled `install-presenced` step
+      --control <CONTROL>
+          PAM control flag for the inserted auth directive. Defaults to `sufficient` so a successful syauth round-trip short-circuits the auth stack and a failed one falls through to the next sufficient module (typically pam_u2f for FIDO2 fallback). Pass `required` to make syauth the only path that can grant auth on this service [default: sufficient]
+      --with-u2f-fallback
+          Also insert `auth sufficient pam_u2f.so cue` directly below the syauth line if the service file does not already carry a `pam_u2f.so` directive. Use this when wiring services that today rely solely on a password fallback (`login`, `su`, `runuser`, …) so the auth chain becomes `syauth -> FIDO -> password`, matching the chain on services where pam_u2f is pre-configured (`sudo`, `gdm-password`). Idempotent: a second invocation with the flag is a no-op when a pam_u2f line is already present
+  -h, --help
+          Print help

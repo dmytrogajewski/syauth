@@ -10,25 +10,19 @@
   Contract", specs/journeys/JOURNEY-S-017-android-approve.md, and
   specs/journeys/JOURNEY-S-018-android-background-bridge.md):
 
-    - BLUETOOTH_SCAN     — scan for advertising peers (S-016 Phase 2).
+    - BLUETOOTH_CONNECT  — connect to the desktop's GATT server +
+                           initiate LESC bonding (S-016 Phase 3).
                            Runtime permission on API 31+.
-                           `neverForLocation` flag asserts we don't infer
-                           location from scan results (we don't — the
-                           desktop advertises a rotating UUID, not a
-                           position).
-    - BLUETOOTH_CONNECT  — connect to a chosen peer + initiate LESC
-                           bonding (S-016 Phase 3). Runtime permission
-                           on API 31+. Also required by the GATT server
-                           the S-018 service opens.
-    - ACCESS_FINE_LOCATION (maxSdkVersion=30) — legacy: BLE scans on
-                           API 26-30 require location. The cap prevents
-                           the dialog from showing on API 31+.
     - USE_BIOMETRIC      — gates the Keystore-backed signing key on a
                            fresh user gesture via BiometricPrompt
                            (S-017 Approve screen).
     - REQUEST_COMPANION_RUN_IN_BACKGROUND — keeps the
                            CompanionDeviceService binding alive while
-                           the bonded peer is in range (S-018).
+                           the bonded peer is in range (S-018) AND
+                           authorises the DEV-001 CDM pivot's
+                           `CompanionDeviceManager.associate` call
+                           that replaces the unprivileged
+                           BluetoothLeScanner path.
     - POST_NOTIFICATIONS — runtime permission on API 33+ for the
                            approve heads-up notification (S-018).
     - FOREGROUND_SERVICE — the CompanionDeviceService runs in the
@@ -39,13 +33,14 @@
                            required when a foreground service exists
                            because of a bonded device (S-018).
 
-  GAP: DEV-003 — the BLUETOOTH_ADVERTISE permission below exists
-  because the phone currently advertises a fixed SYAUTH_GATT_SERVICE_UUID
-  for the desktop's `bluer` central to discover. SPEC §3.2 D8 inverts
-  the direction: the DESKTOP should advertise a rotating session-bound
-  UUID and the phone should scan + connect. On closure of DEV-003,
-  BLUETOOTH_ADVERTISE is removed from this manifest and the always-on
-  GATT host service is deleted. See `docs/known-gaps.md` row DEV-003.
+  DEV-003 removed the legacy advertise permission. The DEV-001 CDM
+  pivot (2026-05-17) removed `BLUETOOTH_SCAN` because Samsung One UI
+  on the Galaxy S25 Ultra requires `BLUETOOTH_PRIVILEGED` for
+  unprivileged scanners; `CompanionDeviceManager.associate` carries a
+  `BluetoothLeDeviceFilter(serviceUuid=...)` and runs the scan under
+  system privileges, so the app no longer needs the scan permission.
+  ACCESS_FINE_LOCATION (the legacy companion of BLUETOOTH_SCAN on
+  API 26-30) follows the same removal logic.
 
   Explicitly NOT declared (still owned by future roadmap items):
     - INTERNET             — never (BLE-only protocol per SPEC §3.4).
@@ -53,36 +48,32 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- BLE scan: required to discover advertising desktops in S-016 Phase 2. -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="31" />
-
     <!-- BLE connect + LESC bond: S-016 Phase 3. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="31" />
 
-    <!-- BLE advertise.
-         GAP: DEV-003 — the phone advertises SYAUTH_GATT_SERVICE_UUID
-         so the desktop's `bluer` scanner can find the phone. SPEC §3.2 D8
-         inverts the direction; this permission is removed on closure
-         of DEV-003. See the file-header comment. -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_ADVERTISE"
-        tools:targetApi="31" />
-
-    <!-- Legacy: BLE scans on API 26-30 require ACCESS_FINE_LOCATION. -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!--
+      S-012: required for `BootCompletedReceiver` to receive
+      `Intent.ACTION_BOOT_COMPLETED`. Without this permission the OS
+      silently drops the broadcast and the receiver never runs,
+      defeating the boot-resurrection trigger.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!--
       S-017: BiometricPrompt gate for the Keystore-backed signing key.
       Required by androidx.biometric:biometric 1.2.0-alpha05.
     -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!--
+      S-014: `SyauthCompanionService` launches `ChallengeApprovalActivity`
+      via `PendingIntent.getActivity` on every fresh challenge frame.
+      Required for `android:showWhenLocked` + `android:turnScreenOn` to
+      wake the screen and render over the keyguard on Android 14+.
+    -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!--
       S-018: CompanionDeviceService background bridge. The four
@@ -96,6 +87,30 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
         tools:targetApi="34" />
+    <!--
+      DEV-001 follow-up: without `REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE`
+      the OS refuses `CompanionDeviceManager.startObservingDevicePresence`
+      and the bonded peer's association sits with
+      `mNotifyOnDeviceNearby=false` — meaning `SyauthCompanionService`
+      never gets bound when the desktop's rotating unlock UUID appears
+      in range. The PAM module then sees `response-timeout` on every
+      unlock. The grant is silent (no runtime dialog); the manifest
+      declaration is sufficient.
+    -->
+    <uses-permission
+        android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE"
+        tools:targetApi="31" />
+
+    <!--
+      Declared so `CompanionDeviceManager.associate(...)` is dispatchable —
+      Android's CDM service refuses the call otherwise (verified on
+      Galaxy S25 Ultra, One UI / Android 15: `IllegalStateException: Must
+      declare uses-feature android.software.companion_device_setup in
+      manifest to use this API`). Anchors the DEV-001 CDM pivot.
+    -->
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="true" />
 
     <application
         android:allowBackup="false"
@@ -128,37 +143,59 @@
         </activity>
 
         <!--
-          S-018: `CompanionDeviceService` subclass the OS binds when
-          the bonded peer comes into BLE range. The class is
-          system-instantiated; exported=true is required so the OS
-          can bind it. `BIND_COMPANION_DEVICE_SERVICE` is the
-          signature-level permission Android enforces on the bind.
+          S-011: long-running foreground `Service` (no longer a
+          `CompanionDeviceService` subclass). `MainActivity` starts
+          it explicitly via `startForegroundService` whenever a
+          bond record exists; the service then holds one
+          `PersistentGattClient` per bonded peer at idle. The
+          `connectedDevice` foreground type satisfies Android 14+'s
+          type-enforcement check at `startForeground` time. The
+          CDM-style intent-filter from S-018 is gone — the OS no
+          longer binds the service via the CompanionDeviceService
+          path.
         -->
         <service
             android:name=".bg.SyauthCompanionService"
-            android:exported="true"
-            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE"
-            android:foregroundServiceType="connectedDevice"
-            tools:targetApi="31">
-            <intent-filter>
-                <action android:name="android.companion.CompanionDeviceService" />
-            </intent-filter>
-        </service>
-
-        <!--
-          GAP: DEV-003 — always-on GATT host service. Started from
-          MainActivity.onCreate after the bond bootstrap returns a
-          non-null record. Exists only because the BLE advertising
-          direction is inverted vs. SPEC §3.2 D8; on closure of
-          DEV-003 this <service> entry and the
-          [SyauthGattHostService] file are removed, leaving the
-          CDM-bound [SyauthCompanionService] as the only foreground
-          service path. See `docs/known-gaps.md` row DEV-003.
-        -->
-        <service
-            android:name=".bg.SyauthGattHostService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice"
-            tools:targetApi="34" />
+            tools:targetApi="31" />
+
+        <!--
+          S-014: `ChallengeApprovalActivity` — transparent, no-history,
+          single-instance activity launched by `SyauthCompanionService`
+          via `PendingIntent.getActivity` on every fresh challenge frame.
+          `android:showWhenLocked="true"` + `android:turnScreenOn="true"`
+          wake the screen and render the prompt over the keyguard.
+          `exported="false"` blocks third-party launch — only this
+          package's own service can fire the intent.
+        -->
+        <activity
+            android:name=".bg.ChallengeApprovalActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:noHistory="true"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.SyauthTranslucent"
+            android:configChanges="orientation|screenSize"
+            tools:targetApi="27" />
+
+        <!--
+          S-012: `BOOT_COMPLETED` resurrection trigger. Fires once per
+          phone boot; the receiver consults the on-disk bond and (when
+          present) issues `startForegroundService` so
+          `SyauthCompanionService` is back up before the user's next
+          `sudo` on the desktop. `exported="true"` is required —
+          `BOOT_COMPLETED` is a protected broadcast sent by the system,
+          and a `false` export would block the dispatch.
+        -->
+        <receiver
+            android:name=".bg.BootCompletedReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

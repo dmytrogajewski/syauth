@@ -83,9 +83,13 @@ fn pair_opts(td: &TempDir, peer_filter: Option<&str>, timeout_secs: u64, yes: bo
         timeout_secs,
         bond_dir: bond_dir_path(td),
         yes,
+        waybar: false,
         // S-019 added the hidden `--scripted-oob` flag; the S-011 cases
         // never set it (they exercise the interactive path or `--yes`).
         scripted_oob: None,
+        // `--force` was added with the typed `PeerAlreadyBonded` error;
+        // tests that exercise the `--force` path set this explicitly.
+        force: false,
     }
 }
 

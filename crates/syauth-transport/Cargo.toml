@@ -19,11 +19,27 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# Default feature set. The `test-fake` feature is included by default
+# so the roadmap closure-condition probe
+# `cargo test -p syauth-transport --test peripheral_contract` works
+# verbatim. Production consumers (`syauth-pam`, `syauth-presenced`)
+# declare the dep with `default-features = false` so the fake never
+# lands in the shipped binary; this keeps the AGENTS.md
+# "production code paths don't pay the cost" non-negotiable.
+default = ["test-fake"]
+
+# S-003: gate the `FakePeripheral` test double so production consumers
+# opt out via `default-features = false`. Downstream daemon tests
+# (S-004 onwards) enable it explicitly with
+# `syauth-transport = { default-features = false, features = ["test-fake"] }`.
+test-fake = []
+
 [dependencies]
 # Shared protocol core. `Frame` and `FrameError` are the only types that cross
 # the `BtPeer` trait boundary, so consumers can swap implementations (mock
 # today, `bluer` in S-010) without touching the upper layers.
-syauth-core = { path = "../syauth-core" }
+syauth-core = { version = "0.1", path = "../syauth-core" }
 
 # Async trait surface. `BtPeer` and `Session` are `async fn` methods on trait
 # objects; `async-trait` is the canonical way to do that on stable Rust.
@@ -63,7 +79,11 @@ bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] 
 hkdf = "0.13"
 sha2 = "0.11"
 
+# Diagnostic logging for GATT registration + control-loop events.
+tracing = "0.1"
+
 [dev-dependencies]
 # Full feature set for tests so we can use `#[tokio::test(flavor = ...)]`,
 # `tokio::time::pause`, etc., should we ever need them.
 tokio = { version = "1", features = ["full"] }
+

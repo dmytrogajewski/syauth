@@ -107,9 +107,8 @@ Focus on understanding **trade-offs**, not just features. Why did they choose X 
 After gathering research, ask yourself:
 
 - **What fits this project?** Filter out ideas that don't match syauth's architecture, philosophy, or user base.
-- **What is ML (Minimum Loveable)?** Not MVP (minimum viable) — what is the smallest version that users would actually enjoy using?
-- **What is the 80/20?** Which 20% of features deliver 80% of the value?
-- **What should we explicitly NOT do?** Anti-goals are as important as goals.
+- **What is the complete scope?** Enumerate every piece the feature needs to be correct and useful. Do not pre-cut the scope to make it look "shippable" — that decision is the user's, not yours.
+- **What should we explicitly NOT do?** Anti-goals are substantive decisions (we won't support X because Y), not scope reductions (we won't ship X for now). Only mark something an anti-goal if there is a concrete reason; if you are unsure, include it in scope and surface the tradeoff.
 
 ### 2.5 Prepare Implementation Proposition
 
@@ -194,11 +193,11 @@ Create `specs/{feature-name}/SPEC.md` with the following structure:
 | <decision_1> | <choice> | <why> | <what else was considered> |
 | <decision_2> | <choice> | <why> | <what else was considered> |
 
-### ML (Minimum Loveable)
-<The smallest version that users would enjoy. Be specific about what is IN and OUT.>
+### Scope
+<Enumerate every piece of the feature, in scope as one cohesive change set. Do not split into "ship now" vs "later" tiers — if something is deferred, it must appear under Anti-Goals with a concrete reason. If you find yourself wanting to defer something, ask first whether the reason is substantive or reflexive scope-cutting.>
 
 ### Anti-Goals
-<What we explicitly will NOT do and why>
+<What we explicitly will NOT do, and the substantive reason for each (architectural mismatch, wrong primitive, security boundary, vendor lock-in, etc.). "Too big for now" is not a substantive reason — those items belong in Scope.>
 
 ## 4. Technical Design
 
@@ -253,9 +252,10 @@ Before writing the spec, verify your research:
 
 - Does it cover at least 3 comparable products or approaches?
 - Have you identified at least 3 key decisions with alternatives considered?
-- Are anti-goals explicitly stated?
-- Is the ML (Minimum Loveable) scope concrete — specific about what is IN and OUT?
+- Are anti-goals explicitly stated, each with a substantive reason (not "too big for now")?
+- Is Scope complete — every piece needed for the feature to be correct and useful, with no reflexive "ship the smallest version" cuts?
 - Does the CJM identify at least 3 friction points with opportunities?
+- Does the spec contain zero estimation language (hours, days, weeks, story points, t-shirt sizes, ETAs, "v1", "MVP", "phase 1") used to defer work? Scope describes what is included; it does not forecast effort.
 
 </self_check>
 
@@ -296,11 +296,12 @@ Full spec written to `specs/mixtures/SPEC.md` — please review.
 
 1. **Research before proposing.** An uninformed spec wastes everyone's time.
 2. **Clarify before researching.** Researching the wrong thing is worse than not researching.
-3. **ML, not MVP.** The minimum version should be loveable, not just viable.
-4. **Anti-goals are goals.** Explicitly stating what you will NOT do prevents scope creep.
-5. **Compact final answer.** The spec is the artifact. The message to the user is the summary.
-6. **Do not implement.** Your job ends at the spec. Implementation is for `/roadmap` → `/implement`.
-7. Do not run git commands or commit unless the user explicitly asks.
+3. **Do not pre-cut scope.** Specify the complete feature. Scope reduction is the user's call, not the researcher's. If you find yourself reaching for "v1 / MVP / phase 1 / later", stop — either the item belongs in Scope, or it belongs in Anti-Goals with a substantive reason.
+4. **Anti-goals require substance.** "Too big for now" is not a substantive reason. Architectural mismatch, wrong primitive, security boundary, or vendor lock-in are.
+5. **No estimation language.** No hours, days, weeks, story points, t-shirt sizes, ETAs, or version-tier framing used to defer work. Performance gates measured by a test ("p99 < 50 ms") are allowed because they are pass/fail, not forecasts.
+6. **Compact final answer.** The spec is the artifact. The message to the user is the summary.
+7. **Do not implement.** Your job ends at the spec. Implementation is for `/roadmap` → `/implement`.
+8. Do not run git commands or commit unless the user explicitly asks.
 
 </rules>
 

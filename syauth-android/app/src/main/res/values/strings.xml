@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Roadmap item S-015 — hello-world app label. -->
+<!--
+  Roadmap item S-015 — string resources for the
+  ChallengeApprovalActivity's BiometricPrompt sheet. The strings are
+  the user-visible copy on the system biometric dialog; the format
+  argument names (%1$s = hostname, %2$s = short peer id) mirror the
+  SPEC §9 Q2 prompt template the under-keyguard activity already
+  shows.
+-->
 <resources>
     <string name="app_name">syauth</string>
+    <string name="syauth_biometric_prompt_title">Approve syauth challenge</string>
+    <string name="syauth_biometric_prompt_subtitle_fmt">%1$s is requesting sudo (peer_id %2$s)</string>
+    <string name="syauth_biometric_prompt_cancel">Cancel</string>
 </resources>

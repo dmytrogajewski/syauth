@@ -28,8 +28,8 @@ pub mod secrets;
 pub mod sign;
 
 pub use bond::{
-    BOND_DIR_MODE, BOND_FILE_MODE, BOND_SCHEMA_VERSION_LATEST, Bond, BondError, BondStatus, BondStore, PEER_ID_BLAKE3_BYTES,
-    peer_id_from_pubkey,
+    BOND_DIR_MODE, BOND_FILE_MODE, BOND_HKDF_INFO_V1, BOND_KEY_DERIVED_BYTES, BOND_SCHEMA_VERSION_LATEST, Bond, BondError, BondStatus,
+    BondStore, PEER_ID_BLAKE3_BYTES, bond_key_from_pubkeys, peer_id_from_pubkey,
 };
 pub use frame::{
     Frame, FrameError, HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD_LEN, MIN_FRAME_LEN, NONCE_LEN, NONCE_OFFSET, PAYLOAD_OFFSET,

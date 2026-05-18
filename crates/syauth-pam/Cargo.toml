@@ -8,7 +8,7 @@ description = "Linux PAM module for syauth phone-as-key unlock (cdylib)."
 
 # Per S-001 DoD: crate-type = ["cdylib", "rlib"] so we get both
 # libpam_syauth.so for the loader AND an rlib so the inner helpers can be
-# exercised by unit tests in the `rlib` form.
+# exercised by ordinary Rust unit tests.
 #
 # `name = "pam_syauth"` is required so the loader resolves
 # `libpam_syauth.so` — PAM strictly expects the module file name to match the
@@ -18,49 +18,42 @@ crate-type = ["cdylib", "rlib"]
 name = "pam_syauth"
 path = "src/lib.rs"
 
-[features]
-# S-009 — enable the `SYAUTH_TEST_MOCK` env-var pathway. Off in release
-# builds. The test harness (`tests/pam_e2e.rs`) turns this on via
-# `[dev-dependencies]` so the integration tests can drive the auth path
-# against an injected mock peer; production cargo builds never set the
-# feature, so the env var is read-then-ignored. See
-# `specs/journeys/JOURNEY-S-009-pam-mock-e2e.md` §2 Phase 1.
-test-mock = []
-
 [dependencies]
 syslog = "7"
 libc = "0.2"
-# S-009 — protocol primitives, transport trait, and async runtime needed to
-# drive a challenge/response from inside `pam_sm_authenticate`. The runtime
-# is created and dropped within a single PAM call so no state crosses the
-# FFI boundary (SPEC §3.4 anti-goal).
+# S-008 — `BondStore` lookup still happens in PAM to pick the
+# `peer_id` for the wire frame. The bond_key + pubkey lookup paths
+# moved to the daemon (`syauth-presenced`).
 syauth-core = { path = "../syauth-core" }
-syauth-transport = { path = "../syauth-transport" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-# Fresh nonces use the OS RNG. `getrandom` 0.3 is already a transitive
-# dependency of the workspace (via `ed25519-dalek` → `rand_core`); using it
-# directly avoids adding a new tier of rand crates. SPEC §4.2 mandates a
-# 16-byte fresh nonce per challenge.
+# S-008 — typed `Request` / `Response` enums + the
+# `read_frame_blocking` / `write_frame_blocking` helpers. Both the
+# daemon (tokio path) and the PAM module (blocking path) share one
+# wire-format module.
+syauth-presenced = { path = "../syauth-presenced", default-features = false }
+# Fresh nonces use the OS RNG. SPEC §4.2 mandates a 16-byte fresh
+# nonce per challenge; even though the daemon currently generates
+# its own nonce, the PAM-side wire frame still carries a
+# non-trivial one so the field is correctly populated.
 getrandom = "0.3"
+# RFC3339 timestamps in the `last.log` audit line.
 time = { version = "0.3", features = ["formatting", "parsing"] }
+# Typed error variants for the SPEC §6 reason → PAM-code mapping.
 thiserror = "2"
-async-trait = "0.1"
+# `nix::unistd::geteuid` for the `/run/user/$UID` fallback when
+# `XDG_RUNTIME_DIR` is unset (SPEC §8 Risks row).
+nix = { version = "0.29", features = ["user"] }
 
 [dev-dependencies]
-# Tests need the in-process mock peer + the workspace's tempfile helper +
-# the crypto primitives needed to construct a signed response. Pulling
-# `syauth-pam` itself in with the `test-mock` feature flag turned on lets
-# the integration test exercise the env-var-gated code path.
-syauth-pam = { path = ".", features = ["test-mock"] }
-syauth-core = { path = "../syauth-core" }
-syauth-transport = { path = "../syauth-transport" }
+# Tests bind ephemeral Unix-domain sockets under tempdirs.
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-async-trait = "0.1"
+syauth-core = { path = "../syauth-core" }
+syauth-presenced = { path = "../syauth-presenced", default-features = false }
 time = { version = "0.3", features = ["formatting", "parsing"] }
-# Needed at dev-test time for the test peer to call `SigningKey::sign` —
-# the `Signer` trait lives in `ed25519-dalek`.
+# `ed25519-dalek` for the integration test that signs a synthetic
+# response with a known keypair before injecting it into the
+# daemon's `--peripheral=fake` test seam.
 ed25519-dalek = "2"
+hex = "0.4"
 
 # The workspace bans `unsafe_code` by default, but the entire purpose of this
 # crate is to expose `unsafe extern "C"` symbols across the libpam ABI. We

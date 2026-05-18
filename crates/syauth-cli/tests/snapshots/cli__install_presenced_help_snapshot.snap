@@ -1,0 +1,13 @@
+---
+source: crates/syauth-cli/tests/cli.rs
+expression: "help_stdout(&[\"install-presenced\", \"--help\"])"
+---
+Install the `syauth-presenced` systemd user unit and (live mode) reload + enable + start it
+
+Usage: syauth install-presenced [OPTIONS]
+
+Options:
+      --from <FROM>          Path to the `syauth-presenced` source binary to install. When omitted, the installer probes for a sibling next to the running `syauth` binary (`current_exe().parent().join("syauth-presenced")`)
+      --unit-dir <UNIT_DIR>  Override the destination directory for the systemd user unit. When omitted, resolves to `$XDG_CONFIG_HOME/systemd/user` (falling back to `$HOME/.config/systemd/user`). Tests pass a tempdir here
+      --dry-run              Print what the installer would do without copying the binary or running `systemctl`. The unit file is still written to `--unit-dir` so tests can read it back
+  -h, --help                 Print help

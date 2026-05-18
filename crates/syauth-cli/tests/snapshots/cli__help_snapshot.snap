@@ -7,14 +7,15 @@ Phone-as-key unlock for Linux PAM
 Usage: syauth <COMMAND>
 
 Commands:
-  pair            Pair a phone with this desktop. Runs LE Secure Connections numeric comparison followed by the app-level 4-word OOB confirmation, then writes the bond on `[y/N]` = Y
-  list            Print the bonds file as TSV: id\tname\tstatus\tcreated_at
-  revoke          Mark a bond as revoked (idempotent). The bond record itself is preserved so the audit trail survives; the PAM module refuses unlock attempts from revoked peers
-  status          Print adapter state, advertising state, bond count, and the most recent unlock outcome. Read-only — never writes to the host
-  install-pam     Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snapshot of the original
-  uninstall-pam   Restore a PAM service file from its `.bak` and remove the bak
-  provision-test  Generate a pre-seeded test bond + emit the provision package the phone consumes via `adb push`. Bridges the still-stubbed LESC flow so the end-to-end unlock path can be demonstrated on real hardware in v0.1
-  help            Print this message or the help of the given subcommand(s)
+  pair               Pair a phone with this desktop. Runs LE Secure Connections numeric comparison followed by the app-level 4-word OOB confirmation, then writes the bond on `[y/N]` = Y
+  list               Print the bonds file as TSV: id\tname\tstatus\tcreated_at
+  revoke             Mark a bond as revoked (idempotent). The bond record itself is preserved so the audit trail survives; the PAM module refuses unlock attempts from revoked peers
+  status             Print adapter state, advertising state, bond count, and the most recent unlock outcome. Read-only — never writes to the host
+  install-pam        Wire `pam_syauth.so` into a PAM service file, atomically and with a `.bak` snapshot of the original
+  uninstall-pam      Restore a PAM service file from its `.bak` and remove the bak
+  install-presenced  Install the `syauth-presenced` systemd user unit and (live mode) reload + enable + start it
+  doctor             Inspect the unlock chain: daemon liveness, bonds file, keys file modes, BlueZ adapter, systemd user unit state, audit-log tail, and the `XDG_RUNTIME_DIR` SSH-session caveat. Emits one greppable `key=value` line per probe plus a final `doctor=ok|warn|fail` summary. `--json` emits the same data as a typed JSON object for tooling
+  help               Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

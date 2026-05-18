@@ -1,5 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- syauth adaptive launcher icon, API 26+. -->
+<!--
+  syauth adaptive launcher icon, API 26+.
+
+  Foreground is the pixel-art cat-paw + key artwork at
+  `assets/syauth.png`, mirrored into `res/drawable-nodpi/
+  ic_launcher_foreground.png` so the resource ID resolves to the
+  bitmap rather than the previous shield+key vector. The artwork
+  already includes a black margin so launcher mask shapes (circle,
+  squircle, teardrop) clip the centred paw cleanly.
+
+  Background stays the pure-black colour from
+  `values/ic_launcher_background.xml` to match the prrr-android
+  sibling app's visual identity.
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_launcher_background"/>
     <foreground android:drawable="@drawable/ic_launcher_foreground"/>

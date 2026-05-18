@@ -148,6 +148,13 @@ dependencies {
     // S-017: BiometricPrompt + CryptoObject for the Approve gate.
     implementation("androidx.biometric:biometric:1.2.0-alpha05")
 
+    // S-012: AndroidX WorkManager backs the 15-minute watchdog that
+    // resurrects the foreground `SyauthCompanionService` after a Samsung
+    // One UI / Pixel Doze kill (SPEC §3 Decisions row "Phone fallback
+    // when service is killed"). Version 2.9.0 aligns with the
+    // androidx.lifecycle 2.7.0 cohort already pinned above.
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+
     // Jetpack Compose — Material3 surface + Text.
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     implementation("androidx.compose.ui:ui")
@@ -173,6 +180,9 @@ dependencies {
     testImplementation("androidx.arch.core:core-testing:2.2.0")
     // S-017: TestDispatcher + advanceTimeBy for the countdown test.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    // S-012: TestListenableWorkerBuilder + initializeTestWorkManager for
+    // SyauthWatchdogWorkerTest. Matches the runtime version above.
+    testImplementation("androidx.work:work-testing:2.9.0")
 
     // Instrumented test surface — Compose UI test rule + JUnit4 wiring.
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
