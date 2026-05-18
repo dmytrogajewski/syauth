@@ -1,10 +1,17 @@
 # syauth — Continuous Integration.
 #
-# Roadmap item S-001 — runs the same `make lint` and `make test` gates on
-# every push and pull request that a developer runs locally. Targets stable
-# Rust on Ubuntu. Uses `taiki-e/install-action` to pull `cargo-audit` and
-# `cargo-deny` as prebuilt binaries (~5 s on cache miss) rather than building
-# them from source.
+# Runs the same gates a developer runs locally:
+#   - `make lint` (clippy --all-targets -D warnings, fmt --check,
+#                  cargo deny check, scope-discipline grep).
+#   - `make test` (workspace, all targets, all features).
+#   - `make build` (release; verifies `libpam_syauth.so` ships).
+#   - Android: `:app:assembleDebug` + `:app:testDebugUnitTest` so the
+#              Compose app cannot drift from the Rust workspace.
+#
+# System libraries the bluer / libpam-sys / libbluetooth-sys build
+# scripts consume are installed via apt on every job that touches
+# them. cargo / gradle caches are warmed by Swatinem/rust-cache and
+# the gradle/actions/setup-gradle@v3 cache.
 
 name: ci
 
@@ -21,14 +28,25 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   RUST_BACKTRACE: "1"
+  # CARGO_INCREMENTAL is disabled in CI by the rust-cache action and
+  # explicitly here so a flaky cache eviction cannot leave incremental
+  # state behind.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   lint:
-    name: lint (clippy + fmt + audit + deny)
+    name: lint (clippy + fmt + deny + scope-discipline)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev libpam0g-dev libbluetooth-dev \
+            pkg-config
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -53,6 +71,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev libpam0g-dev libbluetooth-dev \
+            pkg-config
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -63,11 +88,18 @@ jobs:
         run: make test
 
   build:
-    name: build (release cdylib)
+    name: build (release workspace + cdylib)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev libpam0g-dev libbluetooth-dev \
+            pkg-config
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -80,3 +112,55 @@ jobs:
 
       - name: Verify libpam_syauth.so exists
         run: test -f target/release/libpam_syauth.so
+
+      - name: Verify syauth CLI exists
+        run: test -x target/release/syauth
+
+      - name: Verify syauth-presenced daemon exists
+        run: test -x target/release/syauth-presenced
+
+  android:
+    name: android (assemble debug + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('syauth-android/**/*.gradle*', 'syauth-android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x syauth-android/gradlew
+
+      - name: assembleDebug
+        working-directory: syauth-android
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: testDebugUnitTest
+        working-directory: syauth-android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: syauth-android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
