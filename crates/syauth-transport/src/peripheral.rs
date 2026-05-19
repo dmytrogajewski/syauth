@@ -627,17 +627,52 @@ impl Peripheral for PersistentPeripheral {
         }
         drop(peers);
         let mut slot = notifier_slot.lock().await;
-        match slot.as_mut() {
-            None => {
-                tracing::warn!(target: "syauth_transport", peer_id=%peer_id, "notify_challenge: notifier_slot=None — phone never subscribed (or task missed event)");
+        let Some(writer) = slot.as_mut() else {
+            tracing::warn!(target: "syauth_transport", peer_id=%peer_id, "notify_challenge: notifier_slot=None — phone never subscribed (or task missed event)");
+            return Err(PeripheralError::Backend {
+                reason: format!("no active GATT subscription for peer_id={peer_id}"),
+            });
+        };
+        use tokio::io::AsyncWriteExt;
+        tracing::info!(target: "syauth_transport", peer_id=%peer_id, bytes=frame.len(), "notify_challenge: writing frame");
+        match writer.write_all(frame).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // The cached BlueZ CharacteristicWriter is dead — the phone's
+                // CCCD subscription went stale (common after suspend/resume,
+                // app restart, or radio glitch) but autoConnect keeps the LE
+                // link "up" so the bluer control loop never sees a
+                // disconnect→reconnect that would have issued a fresh
+                // `Notify(writer)` event. Without intervention every future
+                // notify_challenge writes to the same dead writer and audits
+                // outcome=transport-error forever.
+                //
+                // Recovery: drop the dead writer, then Device::disconnect()
+                // every connected peer. The phone's autoConnect re-handshakes
+                // within seconds, its onConnectionStateChange handler runs
+                // `gatt.refresh()` + `discoverServices()` + re-enables
+                // notifications on the syauth characteristic, and the
+                // chal_control task receives `Notify(writer)` so notifier_slot
+                // repopulates with a fresh writer. This call still fails
+                // (the user falls through to FIDO once), but the next
+                // challenge — typically the next sudo within ~5-10s — lands
+                // on the recovered writer.
+                tracing::warn!(
+                    target: "syauth_transport",
+                    peer_id = %peer_id,
+                    error = %err,
+                    "notify_challenge: cached writer dead — evicting and kicking peer for re-subscribe"
+                );
+                *slot = None;
+                drop(slot);
+                if let Err(kick_err) = self.kick_connected_peers().await {
+                    tracing::warn!(
+                        target: "syauth_transport",
+                        error = %kick_err,
+                        "notify_challenge recovery: kick_connected_peers failed"
+                    );
+                }
                 Err(PeripheralError::Backend {
-                    reason: format!("no active GATT subscription for peer_id={peer_id}"),
-                })
-            }
-            Some(writer) => {
-                use tokio::io::AsyncWriteExt;
-                tracing::info!(target: "syauth_transport", peer_id=%peer_id, bytes=frame.len(), "notify_challenge: writing frame");
-                writer.write_all(frame).await.map_err(|err| PeripheralError::Backend {
                     reason: format!("notify_challenge write: {err}"),
                 })
             }
