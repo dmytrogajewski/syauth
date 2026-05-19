@@ -247,6 +247,12 @@ struct PeerCharSet {
     /// JoinHandle for the per-peer control loop (challenge subscribe +
     /// response write reader). Aborted on `remove_peer`.
     task_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Bond key for this peer. Cached so we can rebuild the GATT
+    /// application registration on dead-writer detection without
+    /// having to plumb the bond store all the way down. The bond
+    /// key is the input to `peer_service_uuid(bond_key)`, which the
+    /// rebuild path needs to construct the service tree.
+    bond_key: BondKey,
 }
 
 /// Per-peer response buffer depth for the `PersistentPeripheral`'s
@@ -547,6 +553,94 @@ impl PersistentPeripheral {
         });
         Ok((notifier_slot, response_tx, response_rx, task))
     }
+
+    /// Rebuild the GATT application registration for a single peer.
+    ///
+    /// Why this is needed: a `Device::disconnect()` (our
+    /// `kick_connected_peers`) drops the LE link but **does not** force
+    /// BlueZ to emit a fresh `CharacteristicControlEvent::Notify` when
+    /// the phone re-subscribes against the same `Application` object.
+    /// BlueZ remembers the per-characteristic subscription state across
+    /// link transitions, so a re-subscribe is silently merged into the
+    /// existing one. The `CharacteristicWriter` cached in
+    /// `notifier_slot` stays dead forever, and `notify_challenge`
+    /// audits `transport-error` until the daemon is restarted.
+    ///
+    /// The only kick that reliably triggers a fresh Notify event is
+    /// unregistering the application entirely and re-registering it,
+    /// which discards BlueZ's subscription state. We do that here:
+    /// abort the old chal_control/resp_control task, drop the old
+    /// `ApplicationHandle`, kick any LE link so the phone reconnects
+    /// against the fresh application, then `build_and_register_peer`
+    /// with the cached bond key and swap the new state into the
+    /// `PeerCharSet`.
+    ///
+    /// Lock ordering: we never hold a `notifier_slot` lock across this
+    /// call — `notify_challenge` releases it before invoking us. We
+    /// take the `peers` lock briefly to read `bond_key`, drop it,
+    /// touch `app_handle`, then take `peers` again to swap the entry.
+    async fn rebuild_peer_registration(&self, peer_id: &str) -> Result<(), PeripheralError> {
+        let bond_key: BondKey = {
+            let peers = self.peers.lock().await;
+            let entry = peers.get(peer_id).ok_or_else(|| PeripheralError::UnknownPeer {
+                peer_id: peer_id.to_owned(),
+            })?;
+            entry.bond_key
+        };
+        // Abort the old per-peer control task. After this the previous
+        // chal_control / resp_control characteristic_control streams
+        // are owned by a dead task; dropping the `ApplicationHandle`
+        // below will close them on the BlueZ side.
+        {
+            let peers = self.peers.lock().await;
+            if let Some(entry) = peers.get(peer_id)
+                && let Some(handle) = entry.task_handle.lock().await.take()
+            {
+                handle.abort();
+            }
+        }
+        // Drop the old `ApplicationHandle`. bluer issues
+        // `UnregisterApplication` on Drop, which prompts BlueZ to
+        // forget every CCCD subscription bound to that application.
+        {
+            let mut slot = self.app_handle.lock().await;
+            *slot = None;
+        }
+        // Kick any LE link so the phone reconnects against the fresh
+        // application. Without this the phone's GATT cache still
+        // points at the old application's characteristic handles —
+        // the phone will write CCCD on a handle that no longer
+        // belongs to anything, and BlueZ silently drops the write.
+        if let Err(err) = self.kick_connected_peers().await {
+            tracing::warn!(
+                target: "syauth_transport",
+                error = %err,
+                "rebuild_peer_registration: kick_connected_peers failed"
+            );
+        }
+        // Build + register a fresh application for this peer.
+        let (notifier_slot, response_tx, response_rx, task) =
+            self.build_and_register_peer(&bond_key).await?;
+        // Swap the new state into the peer entry. `bond_key` is
+        // copied (it is a `[u8; N]`) so the new entry stays
+        // self-contained.
+        {
+            let mut peers = self.peers.lock().await;
+            if let Some(entry) = peers.get_mut(peer_id) {
+                *entry.notifier_slot.lock().await = None;
+                entry.notifier_slot = notifier_slot;
+                entry.response_rx = Mutex::new(response_rx);
+                entry._response_tx = response_tx;
+                *entry.task_handle.lock().await = Some(task);
+            }
+        }
+        tracing::info!(
+            target: "syauth_transport",
+            peer_id = %peer_id,
+            "rebuild_peer_registration: fresh GATT application registered, awaiting re-subscribe"
+        );
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -574,6 +668,7 @@ impl Peripheral for PersistentPeripheral {
                 _response_tx: response_tx,
                 notifier_slot,
                 task_handle: Mutex::new(Some(task)),
+                bond_key: *bond_key,
             },
         );
         Ok(())
@@ -639,37 +734,40 @@ impl Peripheral for PersistentPeripheral {
             Ok(()) => Ok(()),
             Err(err) => {
                 // The cached BlueZ CharacteristicWriter is dead — the phone's
-                // CCCD subscription went stale (common after suspend/resume,
-                // app restart, or radio glitch) but autoConnect keeps the LE
-                // link "up" so the bluer control loop never sees a
-                // disconnect→reconnect that would have issued a fresh
-                // `Notify(writer)` event. Without intervention every future
-                // notify_challenge writes to the same dead writer and audits
-                // outcome=transport-error forever.
+                // CCCD subscription went stale (out-of-range, suspend/resume,
+                // app restart, radio glitch). Field testing showed that
+                // simply Device::disconnect()ing the LE link is NOT enough:
+                // BlueZ keeps the per-characteristic subscription state across
+                // link transitions, so when the phone reconnects and writes
+                // CCCD again, BlueZ silently merges that into the existing
+                // subscription and never emits a fresh
+                // `CharacteristicControlEvent::Notify` to our application.
+                // The cached writer in `notifier_slot` stays dead forever
+                // until the daemon restarts.
                 //
-                // Recovery: drop the dead writer, then Device::disconnect()
-                // every connected peer. The phone's autoConnect re-handshakes
-                // within seconds, its onConnectionStateChange handler runs
-                // `gatt.refresh()` + `discoverServices()` + re-enables
-                // notifications on the syauth characteristic, and the
-                // chal_control task receives `Notify(writer)` so notifier_slot
-                // repopulates with a fresh writer. This call still fails
-                // (the user falls through to FIDO once), but the next
-                // challenge — typically the next sudo within ~5-10s — lands
-                // on the recovered writer.
+                // Real recovery: unregister and re-register the entire
+                // per-peer application via `rebuild_peer_registration`.
+                // bluer issues `UnregisterApplication` on `ApplicationHandle`
+                // drop, which discards BlueZ's subscription state. The fresh
+                // registration's chal_control stream then emits `Notify` the
+                // first time the (kicked) phone re-subscribes against it.
+                // This call still fails (FIDO takes over once), but the
+                // next challenge after the phone watchdog reconnects lands
+                // on a healthy writer.
                 tracing::warn!(
                     target: "syauth_transport",
                     peer_id = %peer_id,
                     error = %err,
-                    "notify_challenge: cached writer dead — evicting and kicking peer for re-subscribe"
+                    "notify_challenge: cached writer dead — rebuilding GATT application"
                 );
                 *slot = None;
                 drop(slot);
-                if let Err(kick_err) = self.kick_connected_peers().await {
+                if let Err(rebuild_err) = self.rebuild_peer_registration(peer_id).await {
                     tracing::warn!(
                         target: "syauth_transport",
-                        error = %kick_err,
-                        "notify_challenge recovery: kick_connected_peers failed"
+                        peer_id = %peer_id,
+                        error = %rebuild_err,
+                        "notify_challenge recovery: rebuild_peer_registration failed"
                     );
                 }
                 Err(PeripheralError::Backend {
