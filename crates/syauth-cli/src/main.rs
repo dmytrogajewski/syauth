@@ -17,19 +17,16 @@ use std::{
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use rand::{RngCore, rngs::OsRng};
 use syauth_cli::{
     doctor::{DoctorOpts, run_doctor},
     install_pam::{self, InstallOpts, InstallOutcome},
     install_presenced::{self, InstallPresencedOpts, InstallPresencedOutcome},
     list::run_list,
-    pair::{ListOpts, PairOpts, PairingPhase, run_pair},
-    pair_backend::{BluerPairBackend, make_auto_accept_confirm_handler, make_stdio_confirm_handler, make_waybar_confirm_handler},
+    pair::ListOpts,
     revoke::{RevokeOpts, run_revoke},
     status::{StatusOpts, run_status},
     uninstall_pam::{self, UninstallOpts, UninstallOutcome},
 };
-use syauth_core::SigningKey;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,10 +42,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Pair a phone with this desktop. Runs LE Secure Connections numeric
-    /// comparison followed by the app-level 4-word OOB confirmation, then
-    /// writes the bond on `[y/N]` = Y.
-    Pair(PairOpts),
     /// Print the bonds file as TSV: id\tname\tstatus\tcreated_at.
     List(ListOpts),
     /// Mark a bond as revoked (idempotent). The bond record itself is
@@ -103,7 +96,6 @@ fn main() -> ExitCode {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.cmd {
-        Cmd::Pair(opts) => run_pair_cli(&opts).await,
         Cmd::List(opts) => run_list_cli(&opts),
         Cmd::Revoke(opts) => run_revoke_cli(&opts),
         Cmd::Status(opts) => run_status_cli(&opts).await,
@@ -125,41 +117,6 @@ fn run_revoke_cli(opts: &RevokeOpts) -> Result<()> {
 async fn run_status_cli(opts: &StatusOpts) -> Result<()> {
     run_status(opts).await.map_err(Into::into)
 }
-
-async fn run_pair_cli(opts: &PairOpts) -> Result<()> {
-    // Fresh per-invocation host signing key. The pubkey crosses the wire
-    // over the LESC-bonded pair-service; the private key never leaves
-    // this process and is dropped when the function returns.
-    let mut seed = [0u8; SIGNING_KEY_SEED_LEN];
-    OsRng.fill_bytes(&mut seed);
-    let signing_key = SigningKey::from_bytes(&seed);
-    let backend = BluerPairBackend::new(&opts.adapter, &signing_key);
-    // `--yes` auto-accepts the 6-digit OS-level numeric-comparison
-    // code; `--waybar` surfaces it on the bar via the sy applet;
-    // otherwise stdin drives the y/N prompt. The operator-confirmed
-    // app-OOB code remains the independent gate regardless of which
-    // numeric-comparison handler is selected.
-    if opts.yes {
-        backend.install_confirm_handler(make_auto_accept_confirm_handler());
-    } else if opts.waybar {
-        backend.install_confirm_handler(make_waybar_confirm_handler());
-    } else {
-        backend.install_confirm_handler(make_stdio_confirm_handler());
-    }
-    let phase = run_pair(opts, &backend).await?;
-    let mut stdout = io::stdout().lock();
-    match phase {
-        PairingPhase::Bonded => Ok(()),
-        other => {
-            writeln!(stdout, "pair flow ended in {other:?}; no bond written")?;
-            Err(anyhow::anyhow!("pair flow did not complete: {other:?}"))
-        }
-    }
-}
-
-/// Ed25519 seed length (32 bytes). Named so we never sprinkle the literal
-/// 32 across crypto call sites.
-const SIGNING_KEY_SEED_LEN: usize = 32;
 
 fn run_list_cli(opts: &ListOpts) -> Result<()> {
     run_list(opts).map_err(Into::into)

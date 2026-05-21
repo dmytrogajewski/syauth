@@ -104,11 +104,6 @@ fn help_snapshot() {
 }
 
 #[test]
-fn pair_help_snapshot() {
-    insta::assert_snapshot!("pair_help_snapshot", help_stdout(&["pair", "--help"]));
-}
-
-#[test]
 fn list_help_snapshot() {
     insta::assert_snapshot!("list_help_snapshot", help_stdout(&["list", "--help"]));
 }
