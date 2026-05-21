@@ -95,6 +95,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.sy.syauth.android.R
 import com.sy.syauth.android.ui.theme.SyauthTheme
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
@@ -508,7 +509,33 @@ internal class AndroidBiometricGate(
             callback.onFailed("no PrivateKey under alias '$keystoreAlias'")
             return
         }
-        val signature = Signature.getInstance(ED25519_ALGORITHM).apply { initSign(privateKey) }
+        // `initSign` on an AndroidKeyStore key throws
+        // `KeyPermanentlyInvalidatedException` when biometrics or
+        // device-credential enrollment changed since the key was
+        // minted (`setInvalidatedByBiometricEnrollment(true)` is the
+        // pairing-time contract). The key is unrecoverable by design;
+        // delete the alias so the user gets pushed back through the
+        // pairing flow, and surface a clean error to the activity
+        // (which writes a denied frame) instead of crashing.
+        val signature = runCatching {
+            Signature.getInstance(ED25519_ALGORITHM).apply { initSign(privateKey) }
+        }.getOrElse { err ->
+            if (err is KeyPermanentlyInvalidatedException) {
+                Log.w(
+                    APPROVAL_LOG_TAG,
+                    "key invalidated for peer=$peerId alias=$keystoreAlias — deleting and prompting re-pair",
+                    err,
+                )
+                runCatching {
+                    KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }.deleteEntry(keystoreAlias)
+                }
+                callback.onFailed("key invalidated; please re-pair on the desktop")
+            } else {
+                Log.w(APPROVAL_LOG_TAG, "initSign failed peer=$peerId", err)
+                callback.onFailed("initSign failed: ${err.message}")
+            }
+            return
+        }
         val executor = ContextCompat.getMainExecutor(activity)
         val authCallback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
