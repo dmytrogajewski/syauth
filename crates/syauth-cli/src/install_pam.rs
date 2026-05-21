@@ -493,6 +493,25 @@ mod tests {
         assert_eq!(line, "auth    required    pam_syauth.so timeout=8000");
     }
 
+    /// Roadmap `syauth-integration` step 3 contract: an explicit
+    /// `InstallOpts { control: "sufficient", … }` must thread through
+    /// `build_line` to emit `auth sufficient pam_syauth.so …` — never
+    /// the legacy `auth required …` shape. This guards the regression
+    /// where the control flag would silently fall back to a hard-coded
+    /// constant.
+    #[test]
+    fn control_flag_round_trips_through_build_line() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut opts = opts_for(dir.path());
+        opts.control = "sufficient".to_string();
+        let line = build_line(&opts);
+        assert!(
+            line.starts_with("auth    sufficient    pam_syauth.so"),
+            "control flag must round-trip; got: {line}"
+        );
+        assert!(!line.contains("required"), "must not fall back to required; got: {line}");
+    }
+
     #[test]
     fn u2f_fallback_inserted_when_flag_set_and_no_existing_u2f() {
         let body = "#%PAM-1.0\nauth    sufficient    pam_syauth.so timeout=8000\nauth       substack     system-auth\n";
