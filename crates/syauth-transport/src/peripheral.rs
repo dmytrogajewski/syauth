@@ -42,11 +42,11 @@ use bluer::{
         CharacteristicReader, CharacteristicWriter,
         local::{
             Application, ApplicationHandle, Characteristic, CharacteristicControlEvent, CharacteristicNotify, CharacteristicNotifyMethod,
-            CharacteristicWrite, CharacteristicWriteMethod, Service, characteristic_control,
+            CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Service, characteristic_control,
         },
     },
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use thiserror::Error;
 use tokio::{
     io::AsyncReadExt,
@@ -55,7 +55,10 @@ use tokio::{
 };
 
 use crate::{
-    bluez::{BOND_KEY_BYTES, SYAUTH_CHALLENGE_CHAR_UUID, SYAUTH_RESPONSE_CHAR_UUID, map_adapter_open_error, session_uuid_for},
+    bluez::{
+        BOND_KEY_BYTES, PAIR_PUBKEY_LEN, SYAUTH_CHALLENGE_CHAR_UUID, SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID, SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID,
+        SYAUTH_PAIR_SERVICE_UUID, SYAUTH_RESPONSE_CHAR_UUID, map_adapter_open_error, session_uuid_for,
+    },
     bluez_advertise::{ADVERTISE_DISCOVERABLE, ADVERTISE_LOCAL_NAME},
     error::TransportError,
 };
@@ -299,6 +302,26 @@ pub struct PersistentPeripheral {
     /// selection on the phone, not a desktop-side prompt.
     #[allow(dead_code)]
     agent_handle: AgentHandle,
+    /// Host's pubkey, served on the pair-mode characteristic the
+    /// phone reads at pair time. 32 random bytes generated at
+    /// startup; the desktop side of the pair protocol uses it only
+    /// as opaque HKDF input alongside the phone's pubkey to produce
+    /// the bond_key. Not persisted across daemon restarts — a pair
+    /// attempt that races a restart fails and retries; existing
+    /// bonds are unaffected because the bond_key is committed to
+    /// disk once at pair time.
+    host_pubkey: [u8; PAIR_PUBKEY_LEN],
+    /// Sender side of the pair-event channel. The pair watcher task
+    /// (re-spawned on every application registration) forwards every
+    /// phone-pubkey write here. The receiver is owned by the daemon
+    /// (returned from `new()`) and drives bond derivation +
+    /// persistence + `add_peer`.
+    pair_event_tx: mpsc::Sender<[u8; PAIR_PUBKEY_LEN]>,
+    /// JoinHandle for the pair watcher task spawned by the most
+    /// recent application registration. Aborted before re-spawning
+    /// so we never have two watchers competing on stale control
+    /// streams.
+    pair_watcher: Mutex<Option<JoinHandle<()>>>,
     /// Per-peer characteristic state. Keyed by stable peer_id.
     peers: Mutex<HashMap<String, PeerCharSet>>,
 }
@@ -315,7 +338,7 @@ impl PersistentPeripheral {
     /// Returns [`PeripheralError::AdapterMissing`] when the named
     /// adapter is unknown to BlueZ, or [`PeripheralError::Backend`]
     /// for any other upstream failure.
-    pub async fn new(adapter_id: &str) -> Result<Arc<Self>, PeripheralError> {
+    pub async fn new(adapter_id: &str) -> Result<(Arc<Self>, mpsc::Receiver<[u8; PAIR_PUBKEY_LEN]>), PeripheralError> {
         let session = bluer::Session::new()
             .await
             .map_err(|err| PeripheralError::from(map_adapter_open_error(adapter_id, err)))?;
@@ -356,18 +379,39 @@ impl PersistentPeripheral {
         let agent_handle = session.register_agent(agent).await.map_err(|err| PeripheralError::Backend {
             reason: format!("register_agent: {err}"),
         })?;
-        // Defer `serve_gatt_application` until the first peer is added.
-        // BlueZ on Fedora 43 rejects an empty `Application::default()`
-        // with "No object received"; the application is built with
-        // real services in `add_peer` and re-registered on every diff.
-        Ok(Arc::new(Self {
+        // Mint an opaque 32-byte host pubkey used as HKDF input on the
+        // pair-mode characteristic. The desktop only uses it as
+        // pair-time HKDF input; persistence across daemon restarts is
+        // not required because the derived bond_key is committed to
+        // disk once at pair time.
+        let mut host_pubkey = [0u8; PAIR_PUBKEY_LEN];
+        getrandom::fill(&mut host_pubkey).map_err(|err| PeripheralError::Backend {
+            reason: format!("host_pubkey rng: {err}"),
+        })?;
+        // mpsc channel the pair watcher task forwards phone-pubkey
+        // writes to. Depth 8 absorbs concurrent retries without
+        // back-pressuring the BlueZ GATT-write thread.
+        let (pair_event_tx, pair_event_rx) = mpsc::channel::<[u8; PAIR_PUBKEY_LEN]>(8);
+        let peripheral = Arc::new(Self {
             _session: session,
             adapter,
             app_handle: Mutex::new(None),
             adv_slot: Mutex::new(None),
             agent_handle,
+            host_pubkey,
+            pair_event_tx,
+            pair_watcher: Mutex::new(None),
             peers: Mutex::new(HashMap::new()),
-        }))
+        });
+        // Register an initial GATT application that contains only the
+        // pair-mode service. Without this a fresh-install daemon (no
+        // bonds yet) would be invisible to a phone trying to pair:
+        // BlueZ rejects empty applications, so registration used to
+        // be deferred until the first bond was added — but you cannot
+        // add a bond without first pairing. The pair service is
+        // always-present to break the chicken-and-egg.
+        peripheral.rebuild_application(vec![]).await?;
+        Ok((peripheral, pair_event_rx))
     }
 
     /// Disconnect every LE peer currently connected to our BlueZ
@@ -416,6 +460,149 @@ impl PersistentPeripheral {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Build the always-present pair-mode service: one read-only
+    /// host-pubkey characteristic + one write-only phone-pubkey
+    /// characteristic with an IO `CharacteristicWriteMethod`. Returns
+    /// the constructed `Service` plus the `chal_control` stream we
+    /// spawn a watcher on to forward phone-pubkey writes into
+    /// `pair_event_tx`.
+    ///
+    /// LESC link encryption is enforced at the OS layer by the time
+    /// the phone reaches a GATT write — no characteristic-level
+    /// `secure_*` flags are needed.
+    fn build_pair_service(
+        host_pubkey: [u8; PAIR_PUBKEY_LEN],
+    ) -> (Service, impl futures::Stream<Item = CharacteristicControlEvent> + Send + Unpin + 'static) {
+        let (chal_control, chal_handle) = characteristic_control();
+        let service = Service {
+            uuid: SYAUTH_PAIR_SERVICE_UUID,
+            primary: true,
+            characteristics: vec![
+                Characteristic {
+                    uuid: SYAUTH_PAIR_HOST_PUBKEY_CHAR_UUID,
+                    read: Some(CharacteristicRead {
+                        read: true,
+                        fun: Box::new(move |_| {
+                            let bytes = host_pubkey.to_vec();
+                            async move { Ok(bytes) }.boxed()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Characteristic {
+                    uuid: SYAUTH_PAIR_PHONE_PUBKEY_CHAR_UUID,
+                    write: Some(CharacteristicWrite {
+                        write: true,
+                        write_without_response: true,
+                        method: CharacteristicWriteMethod::Io,
+                        ..Default::default()
+                    }),
+                    control_handle: chal_handle,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        (service, chal_control)
+    }
+
+    /// Register a fresh GATT application. `peer_services` is the
+    /// per-bonded-peer service list (one entry per active bond);
+    /// the always-present pair-mode service is prepended here so
+    /// the daemon stays discoverable for a phone trying to pair
+    /// even with zero bonds.
+    ///
+    /// Replaces the live `app_handle` and (re)spawns the pair
+    /// watcher task. The previous watcher is aborted before the
+    /// new one starts so we never have two competing on stale
+    /// `chal_control` streams.
+    async fn rebuild_application(&self, peer_services: Vec<Service>) -> Result<(), PeripheralError> {
+        // Abort the previous pair watcher first; its chal_control
+        // stream will be invalidated when we drop the old app_handle.
+        if let Some(prev) = self.pair_watcher.lock().await.take() {
+            prev.abort();
+        }
+        let (pair_service, mut pair_control) = Self::build_pair_service(self.host_pubkey);
+        let peer_count = peer_services.len();
+        let mut services = Vec::with_capacity(1 + peer_count);
+        services.push(pair_service);
+        for s in peer_services {
+            services.push(s);
+        }
+        let app = Application {
+            services,
+            ..Default::default()
+        };
+        // Drop the previous app_handle before registering the new
+        // one — bluer rejects a second registration while the first
+        // is live.
+        {
+            let mut slot = self.app_handle.lock().await;
+            *slot = None;
+        }
+        tracing::info!(target: "syauth_transport", peers = peer_count, "registering GATT app with pair service");
+        let new_handle = self
+            .adapter
+            .serve_gatt_application(app)
+            .await
+            .map_err(|err| PeripheralError::Backend {
+                reason: format!("serve_gatt_application: {err}"),
+            })?;
+        {
+            let mut slot = self.app_handle.lock().await;
+            *slot = Some(new_handle);
+        }
+        // Kick connected peers so phones with stale CCCD bindings to
+        // the previous Application are forced to reconnect and
+        // re-subscribe against the fresh registration.
+        if let Err(err) = self.kick_connected_peers().await {
+            tracing::warn!(target: "syauth_transport", error = %err, "kick_connected_peers post-rebuild failed");
+        }
+        // Spawn the pair watcher: every CharacteristicControlEvent::Write
+        // on the phone-pubkey characteristic is a phone trying to
+        // commit a pair. Read 32 bytes, forward to pair_event_tx,
+        // continue (the channel consumer drives bond persistence).
+        let pair_event_tx = self.pair_event_tx.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let evt = match pair_control.next().await {
+                    Some(e) => e,
+                    None => {
+                        tracing::info!(target: "syauth_transport", "pair watcher: control stream closed");
+                        break;
+                    }
+                };
+                let req = match evt {
+                    CharacteristicControlEvent::Write(req) => req,
+                    CharacteristicControlEvent::Notify(_) => continue,
+                };
+                let mut reader = match req.accept() {
+                    Ok(r) => r,
+                    Err(err) => {
+                        tracing::warn!(target: "syauth_transport", error = %err, "pair watcher: req.accept failed");
+                        continue;
+                    }
+                };
+                let mut buf = [0u8; PAIR_PUBKEY_LEN];
+                match reader.read_exact(&mut buf).await {
+                    Ok(_) => {
+                        tracing::info!(target: "syauth_transport", "pair watcher: phone pubkey received");
+                        if let Err(err) = pair_event_tx.send(buf).await {
+                            tracing::warn!(target: "syauth_transport", error = %err, "pair watcher: forward to event channel failed; daemon receiver gone");
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(target: "syauth_transport", error = %err, "pair watcher: read_exact failed");
+                    }
+                }
+            }
+        });
+        *self.pair_watcher.lock().await = Some(task);
         Ok(())
     }
 

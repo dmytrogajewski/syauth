@@ -335,16 +335,33 @@ async fn maybe_spawn_orchestrator(
             return (None, None, None);
         }
     };
-    let peripheral: Arc<dyn Peripheral + Send + Sync> = match config.peripheral_mode {
-        PeripheralMode::Real => match PersistentPeripheral::new(DEFAULT_ADAPTER_NAME).await {
-            Ok(p) => p,
-            Err(err) => {
-                warn_no_orchestrator(&format!("BlueZ adapter open failed: {err}"));
-                return (None, None, None);
+    let (peripheral, pair_events): (Arc<dyn Peripheral + Send + Sync>, Option<tokio::sync::mpsc::Receiver<[u8; 32]>>) =
+        match config.peripheral_mode {
+            PeripheralMode::Real => match PersistentPeripheral::new(DEFAULT_ADAPTER_NAME).await {
+                Ok((p, rx)) => (p, Some(rx)),
+                Err(err) => {
+                    warn_no_orchestrator(&format!("BlueZ adapter open failed: {err}"));
+                    return (None, None, None);
+                }
+            },
+            PeripheralMode::Fake => (seed_fake_peripheral(config), None),
+        };
+    // Pair-event consumer: a phone-pubkey write to the pair-mode
+    // characteristic surfaces here. Bond derivation + persistence
+    // lands in the follow-up step; this task just logs the event
+    // so a real pair attempt is visible in `journalctl` before the
+    // persistence path is wired.
+    if let Some(mut rx) = pair_events {
+        tokio::spawn(async move {
+            while let Some(phone_pubkey) = rx.recv().await {
+                tracing::info!(
+                    target: "syauth_presenced",
+                    pubkey_hex = %hex::encode(phone_pubkey),
+                    "pair: phone pubkey received (persistence pending)"
+                );
             }
-        },
-        PeripheralMode::Fake => seed_fake_peripheral(config),
-    };
+        });
+    }
     // Register the seed bond with the peripheral so `notify_challenge`
     // / `wait_for_response` calls in `Orchestrator::issue_challenge`
     // resolve the peer. The reload pipeline does this for subsequent

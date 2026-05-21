@@ -82,6 +82,11 @@ sha2 = "0.11"
 # Diagnostic logging for GATT registration + control-loop events.
 tracing = "0.1"
 
+# 32 random bytes for the host pubkey served on the pair characteristic.
+# Already in the workspace via `syauth-presenced` and `syauth-pam`;
+# pinned to the same major (0.3) so cargo resolves a single copy.
+getrandom = "0.3"
+
 [dev-dependencies]
 # Full feature set for tests so we can use `#[tokio::test(flavor = ...)]`,
 # `tokio::time::pause`, etc., should we ever need them.
