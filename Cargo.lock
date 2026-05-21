@@ -2316,6 +2316,7 @@ dependencies = [
  "async-trait",
  "bluer",
  "futures",
+ "getrandom 0.3.4",
  "hkdf 0.13.0",
  "sha2 0.11.0",
  "syauth-core",

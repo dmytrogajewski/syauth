@@ -112,27 +112,36 @@ async fn rotates_at_minute_boundary() {
         "expected {expected_count} set_session_uuids calls (1 construction + {TICKS} ticks), got {}",
         calls.len()
     );
-    // Each recorded UUID set must be a 1-element set whose single
-    // member is `session_uuid_for(bond_key, minute)` for SOME minute.
-    // Deriving the exact minute index from the test's virtual clock
-    // requires reading `SystemTime::now()`, which the paused tokio
-    // clock does not control, so we assert the value belongs to the
-    // expected sequence around the wall-clock instant the test ran.
+    // Each recorded UUID set is a 2-element set: the bonded peer's
+    // `session_uuid_for(bond_key, minute)` PLUS the always-present
+    // pair-mode UUID derived from the zero bond key for the same
+    // minute. Deriving the exact minute index from the test's
+    // virtual clock requires reading `SystemTime::now()`, which the
+    // paused tokio clock does not control, so we assert the values
+    // belong to the expected sequence around the wall-clock instant
+    // the test ran.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock after epoch")
         .as_secs();
     let now_minute = i64::try_from(now_secs / SECONDS_PER_MINUTE).expect("minute fits in i64");
+    let zero_bond = [0u8; syauth_transport::BOND_KEY_BYTES];
     let allowed: HashSet<Uuid> = (now_minute - 2..=now_minute + 2)
-        .map(|m| Uuid::from_bytes(session_uuid_for(&BOND_KEY, m)))
+        .flat_map(|m| {
+            [
+                Uuid::from_bytes(session_uuid_for(&BOND_KEY, m)),
+                Uuid::from_bytes(session_uuid_for(&zero_bond, m)),
+            ]
+        })
         .collect();
     for (i, recorded) in calls.iter().enumerate() {
-        assert_eq!(recorded.len(), 1, "call #{i} should be a 1-element UUID set, got {recorded:?}");
-        let only = recorded.iter().next().copied().expect("1-element set has 1 member");
-        assert!(
-            allowed.contains(&only),
-            "call #{i} UUID {only} is not in the expected session_uuid_for window"
-        );
+        assert_eq!(recorded.len(), 2, "call #{i} should be a 2-element UUID set (peer + pair), got {recorded:?}");
+        for uuid in recorded {
+            assert!(
+                allowed.contains(uuid),
+                "call #{i} UUID {uuid} is not in the expected session_uuid_for window"
+            );
+        }
     }
 }
 

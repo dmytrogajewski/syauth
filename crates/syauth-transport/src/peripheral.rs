@@ -414,6 +414,11 @@ impl PersistentPeripheral {
         // be deferred until the first bond was added — but you cannot
         // add a bond without first pairing. The pair service is
         // always-present to break the chicken-and-egg.
+        //
+        // Advertising the pair-mode UUID is the orchestrator's job
+        // (it includes the pair UUID in every minute's union); we
+        // just register the GATT app here so the characteristic is
+        // discoverable once the orchestrator publishes the UUID.
         peripheral.rebuild_application(vec![]).await?;
         Ok((peripheral, pair_event_rx))
     }

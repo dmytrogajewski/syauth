@@ -321,20 +321,12 @@ async fn maybe_spawn_orchestrator(
         }
     };
     let first_active = store.list().iter().find(|b| matches!(b.status, BondStatus::Bonded)).cloned();
-    let bond = match first_active {
-        Some(b) => b,
-        None => {
-            warn_no_orchestrator("no non-revoked bond available, skipping rotation");
-            return (None, None, None);
-        }
-    };
-    let bond_key = match load_bond_key(&config.keys_dir, &bond.peer_id) {
-        Ok(k) => k,
-        Err(reason) => {
-            warn_no_orchestrator(&format!("bond key load failed: {reason}"));
-            return (None, None, None);
-        }
-    };
+    // Bring up the BlueZ peripheral + pair-event consumer EVEN WHEN
+    // no bond exists yet. This is the load-bearing change for the
+    // daemon-owned pair flow: a fresh-install daemon must be
+    // discoverable so a phone can complete its first pair, after
+    // which the consumer adds the bond and the orchestrator can
+    // spin up on the next reload.
     type PairEventRx = tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>;
     let (peripheral, pair_events): (Arc<dyn Peripheral + Send + Sync>, Option<PairEventRx>) = match config.peripheral_mode {
         PeripheralMode::Real => match PersistentPeripheral::new(DEFAULT_ADAPTER_NAME).await {
@@ -346,25 +338,29 @@ async fn maybe_spawn_orchestrator(
         },
         PeripheralMode::Fake => (seed_fake_peripheral(config), None),
     };
-    // Pair-event consumer: every phone-pubkey write to the pair
-    // characteristic surfaces here. We derive the bond_key via the
-    // canonical HKDF (host_pubkey ‖ phone_pubkey), persist the bond
-    // record + per-peer key file, and add the peer to the live set
-    // so notify_challenge can target it immediately. No CLI
-    // involvement; the desktop never prompts.
-    if let Some(rx) = pair_events {
-        let bonds_path = config.bonds_file.clone();
-        let keys_dir = config.keys_dir.clone();
-        let peripheral_for_pair = Arc::clone(&peripheral);
-        tokio::spawn(pair_event_consumer(rx, bonds_path, keys_dir, peripheral_for_pair));
-    }
-    // Register the seed bond with the peripheral so `notify_challenge`
-    // / `wait_for_response` calls in `Orchestrator::issue_challenge`
-    // resolve the peer. The reload pipeline does this for subsequent
-    // bond additions; the cold-start seed needs an explicit register.
-    if let Err(err) = peripheral.add_peer(&bond.peer_id, &bond_key).await {
-        warn_no_orchestrator(&format!("peripheral add_peer failed: {err}"));
-        return (None, None, None);
+    // Load any pre-existing non-revoked bond into the orchestrator's
+    // seed peer set. With zero bonds the seed is empty — the
+    // orchestrator still runs (it advertises the pair-mode UUID every
+    // minute so a phone can complete its first pair through the
+    // daemon-owned pair flow).
+    let mut seed_peers: Vec<(Bond, [u8; BOND_KEY_BYTES])> = Vec::new();
+    if let Some(b) = first_active {
+        match load_bond_key(&config.keys_dir, &b.peer_id) {
+            Ok(k) => {
+                if let Err(err) = peripheral.add_peer(&b.peer_id, &k).await {
+                    warn_no_orchestrator(&format!("peripheral add_peer failed: {err}"));
+                    return (None, None, None);
+                }
+                seed_peers.push((b, k));
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    target: "syauth_presenced",
+                    reason,
+                    "seed bond key load failed; orchestrator will run with empty peer set (pair mode only)"
+                );
+            }
+        }
     }
     let audit_log = match crate::audit::AuditLog::open(&config.audit_log_path) {
         Ok(l) => Some(l),
@@ -380,13 +376,24 @@ async fn maybe_spawn_orchestrator(
     let start = Instant::now() + align_to_next_minute(std::time::SystemTime::now());
     let orchestrator = Arc::new(Orchestrator::with_peers_and_audit(
         peripheral,
-        vec![(bond, bond_key)],
+        seed_peers,
         config.bonds_file.clone(),
         config.keys_dir.clone(),
         start,
         audit_log,
     ));
     let reload_tx = orchestrator.reload_sender();
+    // Spawn the pair-event consumer now that we have a reload_tx
+    // handle. The consumer writes bonds.toml + key file then signals
+    // the orchestrator to reload; the orchestrator handles
+    // peripheral.add_peer + internal peer set update atomically so
+    // the pair listener and the rotation loop stay in sync.
+    if let Some(rx) = pair_events {
+        let bonds_path = config.bonds_file.clone();
+        let keys_dir = config.keys_dir.clone();
+        let reload_tx_for_pair = reload_tx.clone();
+        tokio::spawn(pair_event_consumer(rx, bonds_path, keys_dir, reload_tx_for_pair));
+    }
     let orchestrator_handle = Arc::clone(&orchestrator);
     let handle = tokio::spawn(Arc::clone(&orchestrator).run(shutdown));
     (Some(handle), Some(reload_tx), Some(orchestrator_handle))
@@ -499,8 +506,10 @@ fn warn_no_orchestrator(reason: &str) {
 /// is a `(host_pubkey, phone_pubkey)` pair the phone wrote to the
 /// pair-mode characteristic after completing LESC bonding. The
 /// consumer derives the canonical bond_key, persists the bond record
-/// and per-peer key file, and calls `add_peer` on the live peripheral
-/// so subsequent challenges target the new peer.
+/// and per-peer key file, then asks the orchestrator to reload —
+/// `peripheral.add_peer` happens inside the orchestrator's reload
+/// path so the rotation set, internal peer map, and peripheral state
+/// stay in lockstep.
 ///
 /// Best-effort: a failure on any step logs a warn and continues — the
 /// phone will retry the write if the link stays alive, or the user
@@ -510,7 +519,7 @@ async fn pair_event_consumer(
     mut rx: tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>,
     bonds_path: std::path::PathBuf,
     keys_dir: std::path::PathBuf,
-    peripheral: Arc<dyn Peripheral + Send + Sync>,
+    reload_tx: mpsc::Sender<ReloadCommand>,
 ) {
     while let Some((host_pubkey, phone_pubkey)) = rx.recv().await {
         let peer_id = peer_id_from_pubkey(&phone_pubkey);
@@ -551,21 +560,23 @@ async fn pair_event_consumer(
             );
             continue;
         }
-        // 3. Add to the live peripheral so the per-peer service is
-        //    registered and `notify_challenge(peer_id, ...)` resolves.
-        if let Err(err) = peripheral.add_peer(&peer_id, &bond_key).await {
+        // 3. Signal the orchestrator to reload. It will re-read
+        //    bonds.toml, diff against its live peer set, and call
+        //    `peripheral.add_peer` itself so the rotation loop and
+        //    the peripheral state stay coherent.
+        if let Err(err) = reload_tx.send(ReloadCommand { trigger: ReloadTrigger::Pair }).await {
             tracing::warn!(
                 target: "syauth_presenced",
                 peer_id = %peer_id,
                 error = %err,
-                "pair: peripheral.add_peer failed"
+                "pair: orchestrator reload signal failed; daemon will pick the bond up on next inotify event"
             );
             continue;
         }
         tracing::info!(
             target: "syauth_presenced",
             peer_id = %peer_id,
-            "pair: bond committed; peer is live"
+            "pair: bond persisted; orchestrator reload requested"
         );
     }
     tracing::info!(target: "syauth_presenced", "pair_event_consumer: channel closed");
