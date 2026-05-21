@@ -79,6 +79,7 @@ class SyauthCompanionServiceTest {
     @After
     fun cleanup() {
         SyauthCompanionService.resetSeams()
+        ChallengeApprovalActivity.resetSeams()
     }
 
     @Test
@@ -119,6 +120,83 @@ class SyauthCompanionServiceTest {
         for ((_, client) in factory.created) {
             assertTrue("client started", client.startCalls >= 1)
         }
+    }
+
+    /**
+     * BUG-20260522-0130: when Android kills the app process under memory
+     * pressure and `START_STICKY` brings `SyauthCompanionService` back
+     * without going through `MainActivity`, the JVM-static
+     * [SyauthCompanionService.gattClientFactory] is `null`. The previous
+     * `injectClientsForBonds()` early-returned in that case, leaving
+     * the resurrected service alive (foreground notification visible,
+     * `isRunning=true`) but with `clients = []` — every challenge
+     * from the desktop instant-failed `transport-error` until the user
+     * manually opened the app UI. Regression guard: `onCreate` must
+     * install a default factory itself so a process-restarted service
+     * is self-sufficient.
+     */
+    @Test
+    fun on_create_installs_default_gatt_client_factory_when_none_preset() {
+        // Empty bond list keeps the test JVM-pure — we're asserting the
+        // factory got installed, not exercising connectGatt. The
+        // factory's `create` lambda is never invoked here.
+        SyauthCompanionService.bondListProvider = BondListProvider { emptyList() }
+        // gattClientFactory intentionally left null — simulates the
+        // post-process-restart cold-start.
+
+        Robolectric.buildService(SyauthCompanionService::class.java).create()
+
+        assertNotNull(
+            "onCreate must install a default GattClientFactory so a service " +
+                "resurrected via START_STICKY can connect without MainActivity",
+            SyauthCompanionService.gattClientFactory,
+        )
+    }
+
+    /**
+     * BUG-20260522-0138 (extension): even with `gattClientFactory`
+     * defaulted, the approval path still failed on a process-restarted
+     * service because four other JVM-static seams owned by
+     * `MainActivity.installCompanionSeams` were null. The user observed
+     * "tap Approve → app closes without biometric" — the activity bailed
+     * with `alias=''` (`keystoreAliasResolver=null`) before reaching
+     * BiometricPrompt. Regression guard: every load-bearing companion
+     * seam must be non-null after `onCreate`.
+     */
+    @Test
+    fun on_create_installs_default_companion_seams_when_none_preset() {
+        SyauthCompanionService.bondListProvider = BondListProvider { emptyList() }
+        // All seams intentionally left null — simulates the
+        // post-process-restart cold-start where MainActivity has not
+        // had a chance to call installCompanionSeams.
+
+        Robolectric.buildService(SyauthCompanionService::class.java).create()
+
+        assertNotNull(
+            "onCreate must default bondKeyProvider",
+            SyauthCompanionService.bondKeyProvider,
+        )
+        assertNotNull(
+            "onCreate must default hostnameResolver",
+            SyauthCompanionService.hostnameResolver,
+        )
+        assertNotNull(
+            "onCreate must default keystoreAliasResolver (load-bearing for Approve)",
+            SyauthCompanionService.keystoreAliasResolver,
+        )
+        assertNotNull(
+            "onCreate must default challengeVerifier",
+            SyauthCompanionService.challengeVerifier,
+        )
+        assertNotNull(
+            "onCreate must default ChallengeApprovalActivity.responseSink " +
+                "(load-bearing for Approve to deliver signature to host)",
+            ChallengeApprovalActivity.responseSink,
+        )
+        assertNotNull(
+            "onCreate must default ChallengeApprovalActivity.cancelSink",
+            ChallengeApprovalActivity.cancelSink,
+        )
     }
 
     @Test

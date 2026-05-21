@@ -24,6 +24,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -251,6 +252,8 @@ public class SyauthCompanionService : Service() {
         ensureNotificationChannel()
         val notification = buildForegroundNotification()
         startForegroundCompat(notification)
+        ensureDefaultGattClientFactory()
+        ensureDefaultCompanionSeams()
         injectClientsForBonds()
         isRunning.set(true)
         Log.i(SYAUTH_BG_LOG_TAG, "onCreate: foreground up, clients=${clients.size}")
@@ -324,6 +327,137 @@ public class SyauthCompanionService : Service() {
                     Log.w(SYAUTH_BG_LOG_TAG, "client.start failed peer=${bond.peerId}", it)
                 }
         }
+    }
+
+    /**
+     * BUG-20260522-0130: when Android kills the app process under
+     * memory pressure and `START_STICKY` resurrects the service, the
+     * companion-object [gattClientFactory] is reset to `null` because
+     * the entire JVM was torn down. `MainActivity` is the only place
+     * the production factory was previously installed, so a service
+     * resurrected without the UI being reopened would sit alive with
+     * `clients = []` forever — every challenge from the desktop
+     * instant-failed `transport-error`. This installer runs inside
+     * `onCreate` so a process-restarted service is self-sufficient.
+     *
+     * Mirrors `MainActivity.installPersistentClientFactory` field-by-
+     * field; the activity's installer remains as a no-op when the
+     * default is already in place (the `gattClientFactory != null`
+     * guard there short-circuits cleanly).
+     */
+    private fun ensureDefaultGattClientFactory() {
+        if (gattClientFactory != null) return
+        val adapter = runCatching {
+            getSystemService(BluetoothManager::class.java)?.adapter
+        }.getOrNull()
+        if (adapter == null) {
+            Log.w(
+                SYAUTH_BG_LOG_TAG,
+                "ensureDefaultGattClientFactory: no BluetoothAdapter; clients will stay empty until MainActivity installs a factory",
+            )
+            return
+        }
+        val appContext = applicationContext
+        gattClientFactory = GattClientFactory { bond ->
+            val client = PersistentGattClient(
+                context = appContext,
+                adapter = adapter,
+                peerId = bond.peerId,
+                deviceMac = bond.peerId,
+                onChallenge = { peerId, frameBytes ->
+                    val challengeBody = if (frameBytes.size > 16) {
+                        frameBytes.copyOfRange(0, frameBytes.size - 16)
+                    } else {
+                        frameBytes
+                    }
+                    launchApprovalActivity(appContext, peerId, challengeBody)
+                },
+            )
+            PersistentGattClientRegistry.put(bond.peerId, client)
+            PersistentManagedClient(client)
+        }
+        Log.i(
+            SYAUTH_BG_LOG_TAG,
+            "ensureDefaultGattClientFactory: installed (MainActivity had not yet)",
+        )
+    }
+
+    /**
+     * BUG-20260522-0138 (extension): the original fix installed a
+     * default `gattClientFactory` so the persistent BLE link came up
+     * after a `START_STICKY` resurrect. That unblocked transport but
+     * the **approval path** then failed with `alias=''` because
+     * `keystoreAliasResolver`, `hostnameResolver`, `bondKeyProvider`,
+     * `challengeVerifier`, and the activity-level
+     * [ChallengeApprovalActivity.responseSink] /
+     * [ChallengeApprovalActivity.cancelSink] are also JVM-static
+     * seams owned by `MainActivity.installCompanionSeams`. Each gets
+     * wiped by the process-restart and the user observes "Approve
+     * tap closes the app without biometric → desktop PAM falls back
+     * to FIDO2."
+     *
+     * This helper mirrors `MainActivity.installCompanionSeams`
+     * load-bearing assignments using the persisted bond record as the
+     * source of truth. It does **not** install
+     * [ChallengeApprovalActivity.historyDispatcher] — history
+     * notifications are UI-tier and the responseSink default
+     * dispatches a `null`-safe history payload when no dispatcher is
+     * present (the post-restart user gets unlock back; the history
+     * surface re-attaches when they next open the app).
+     */
+    private fun ensureDefaultCompanionSeams() {
+        val appContext = applicationContext
+        val recordSupplier: () -> BondRecord? = {
+            runCatching { loadPersistedBond(appContext.filesDir) }.getOrNull()
+        }
+        if (bondKeyProvider == null) {
+            bondKeyProvider = BondKeyProvider { peerId ->
+                recordSupplier()?.takeIf { it.peerId == peerId }?.bondKey
+            }
+        }
+        if (hostnameResolver == null) {
+            hostnameResolver = HostnameResolver { peerId ->
+                recordSupplier()?.takeIf { it.peerId == peerId }?.hostName ?: peerId
+            }
+        }
+        if (keystoreAliasResolver == null) {
+            keystoreAliasResolver = KeystoreAliasResolver { peerId ->
+                recordSupplier()?.takeIf { it.peerId == peerId }?.keystoreAlias.orEmpty()
+            }
+        }
+        if (challengeVerifier == null) {
+            challengeVerifier = UniffiChallengeVerifier()
+        }
+        if (ChallengeApprovalActivity.responseSink == null) {
+            ChallengeApprovalActivity.responseSink = ResponseSink { peerId, responseBytes ->
+                val client = PersistentGattClientRegistry.lookup(peerId)
+                if (client == null) {
+                    Log.w(SYAUTH_BG_LOG_TAG, "approve: no persistent client for peer=$peerId")
+                } else {
+                    runCatching { client.writeResponse(responseBytes) }
+                        .onFailure {
+                            Log.w(SYAUTH_BG_LOG_TAG, "approve: writeResponse failed peer=$peerId", it)
+                        }
+                }
+            }
+        }
+        if (ChallengeApprovalActivity.cancelSink == null) {
+            ChallengeApprovalActivity.cancelSink = CancelSink { peerId, deniedFrameBytes ->
+                val client = PersistentGattClientRegistry.lookup(peerId)
+                if (client == null) {
+                    Log.w(SYAUTH_BG_LOG_TAG, "cancel: no persistent client for peer=$peerId")
+                } else {
+                    runCatching { client.writeResponse(deniedFrameBytes) }
+                        .onFailure {
+                            Log.w(SYAUTH_BG_LOG_TAG, "cancel: writeResponse failed peer=$peerId", it)
+                        }
+                }
+            }
+        }
+        Log.i(
+            SYAUTH_BG_LOG_TAG,
+            "ensureDefaultCompanionSeams: installed missing seams (MainActivity had not yet)",
+        )
     }
 
     private fun defaultBondListProvider(): BondListProvider = BondListProvider {
