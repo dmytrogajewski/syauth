@@ -539,15 +539,21 @@ class MainActivity : FragmentActivity() {
         approvePayload.value = parseApprovePayload(intent)
         val record = runCatching { loadPersistedBond(filesDir) }.getOrNull()
         bondRecord.value = record
+        // Always request BLE runtime permissions on activity start, not just
+        // when a bond exists. The pair flow's `BluetoothDevice.createBond()`
+        // throws `SecurityException` without `BLUETOOTH_CONNECT`, and a
+        // fresh install (no bond) takes the user straight into the pair
+        // flow — gating the request behind `record != null` makes pairing
+        // impossible to bootstrap after `pm clear` or a fresh install.
+        if (!haveAnyBluetoothRuntimePermission()) {
+            bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
+        }
         if (record == null) {
             Toast.makeText(this, NO_BOND_TOAST, Toast.LENGTH_LONG).show()
         } else {
             installCompanionSeams(record)
             installPersistentClientFactory(record)
             startObservingForBondedAssociations(record)
-            if (!haveAnyBluetoothRuntimePermission()) {
-                bluetoothPermissionLauncher.launch(BLUETOOTH_RUNTIME_PERMISSIONS)
-            }
             startSyauthCompanionForegroundService()
             scheduleSyauthWatchdog()
         }
