@@ -585,10 +585,29 @@ pub fn make_waybar_confirm_handler() -> OsConfirmHandler {
     })
 }
 
-/// Resolve `${XDG_RUNTIME_DIR}/syauth`. Returns `None` if
-/// `XDG_RUNTIME_DIR` is not set — the handler then falls back to
-/// "reject" since there is no agreed-upon path with the applet.
+/// Resolve `${XDG_RUNTIME_DIR}/syauth`. Returns `None` if neither
+/// `SUDO_UID` nor `XDG_RUNTIME_DIR` yields a usable path — the
+/// handler then falls back to "reject" since there is no agreed-upon
+/// path with the applet.
+///
+/// `SUDO_UID` is consulted first because the desktop pair process
+/// runs under `sudo`, where `env_reset` (the Fedora default) wipes
+/// the caller's `XDG_RUNTIME_DIR`. `sudo` itself preserves
+/// `SUDO_UID` regardless of `env_reset`, so deriving the per-user
+/// runtime tmpfs from it lets the privileged pair process write to
+/// the SAME directory the unprivileged waybar applet polls
+/// (`/run/user/<original-uid>/syauth/`). Without this, the request
+/// JSON lands at `/run/user/0/syauth/` (root's runtime) and the
+/// applet never sees it, causing every pair attempt to time out
+/// with `User Confirmation Negative Reply` and SMP
+/// `Pairing Failed`.
 fn pair_ipc_dir() -> Option<std::path::PathBuf> {
+    if let Some(sudo_uid_os) = std::env::var_os("SUDO_UID")
+        && let Some(sudo_uid) = sudo_uid_os.to_str().and_then(|s| s.parse::<u32>().ok())
+    {
+        let path = std::path::PathBuf::from(format!("/run/user/{sudo_uid}")).join(PAIR_IPC_DIR_SUBPATH);
+        return Some(path);
+    }
     let xdg = std::env::var_os("XDG_RUNTIME_DIR")?;
     if xdg.is_empty() {
         return None;
