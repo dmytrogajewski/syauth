@@ -37,6 +37,7 @@ use async_trait::async_trait;
 use bluer::{
     Uuid,
     adv::Advertisement,
+    agent::{Agent, AgentHandle, RequestConfirmation},
     gatt::{
         CharacteristicReader, CharacteristicWriter,
         local::{
@@ -285,6 +286,19 @@ pub struct PersistentPeripheral {
     /// `set_session_uuids`. Optional because the daemon may construct
     /// the peripheral before any UUIDs are known (cold-start path).
     adv_slot: Mutex<Option<bluer::adv::AdvertisementHandle>>,
+    /// BlueZ agent handle, held for the lifetime of the daemon.
+    /// Dropping it unregisters the agent; we never drop it because
+    /// the daemon is the sole pairing responder on the desktop.
+    ///
+    /// Registered at `new()` so any phone-initiated LESC pairing
+    /// against this adapter dispatches `request_confirmation` to
+    /// our handler instead of falling back to the system default
+    /// (which rejects numeric comparison and forces the bond to
+    /// time out with `HCI_ERR_AUTH_FAILURE`). The callback
+    /// auto-accepts: the user's trust signal is the CDM-picker
+    /// selection on the phone, not a desktop-side prompt.
+    #[allow(dead_code)]
+    agent_handle: AgentHandle,
     /// Per-peer characteristic state. Keyed by stable peer_id.
     peers: Mutex<HashMap<String, PeerCharSet>>,
 }
@@ -311,6 +325,37 @@ impl PersistentPeripheral {
         adapter.set_powered(true).await.map_err(|err| PeripheralError::Backend {
             reason: format!("adapter set_powered: {err}"),
         })?;
+        // Make the adapter ready to accept phone-initiated LESC pairing
+        // at any time, without requiring a separate `syauth pair` process
+        // to flip these flags. The daemon is the sole BlueZ client on the
+        // desktop; it owns these settings for its lifetime.
+        adapter
+            .set_discoverable(true)
+            .await
+            .map_err(|err| PeripheralError::Backend {
+                reason: format!("adapter set_discoverable: {err}"),
+            })?;
+        adapter.set_pairable(true).await.map_err(|err| PeripheralError::Backend {
+            reason: format!("adapter set_pairable: {err}"),
+        })?;
+        // Register a system-wide BlueZ pairing agent so phone-initiated
+        // LESC numeric-comparison bonding attempts dispatch their
+        // `request_confirmation` callback to us. `request_default = true`
+        // makes us the system default agent for the daemon's lifetime;
+        // without this BlueZ would route to whatever Just-Works fallback
+        // it has and the bond would fail with HCI_ERR_AUTH_FAILURE.
+        //
+        // The handler auto-accepts: the trust signal is the user's
+        // CDM-picker tap on the phone selecting this desktop. The desktop
+        // never prompts; that's the UX contract.
+        let agent = Agent {
+            request_default: true,
+            request_confirmation: Some(Box::new(|_req: RequestConfirmation| Box::pin(async move { Ok(()) }))),
+            ..Default::default()
+        };
+        let agent_handle = session.register_agent(agent).await.map_err(|err| PeripheralError::Backend {
+            reason: format!("register_agent: {err}"),
+        })?;
         // Defer `serve_gatt_application` until the first peer is added.
         // BlueZ on Fedora 43 rejects an empty `Application::default()`
         // with "No object received"; the application is built with
@@ -320,6 +365,7 @@ impl PersistentPeripheral {
             adapter,
             app_handle: Mutex::new(None),
             adv_slot: Mutex::new(None),
+            agent_handle,
             peers: Mutex::new(HashMap::new()),
         }))
     }
