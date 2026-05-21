@@ -98,6 +98,9 @@ getrandom = "0.3"
 # (`{peer_id, nonce_hex, ...}`). The crate has zero transitive deps
 # beyond `core`, so the workspace closure stays tight.
 hex = "0.4"
+# Daemon-side pair flow stamps `Bond.created_at` with the wall-clock
+# at the moment of pair completion. Same major as syauth-core.
+time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]
 # Smoke test spawns the release binary and drives it through SIGTERM.

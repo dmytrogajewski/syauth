@@ -313,10 +313,11 @@ pub struct PersistentPeripheral {
     host_pubkey: [u8; PAIR_PUBKEY_LEN],
     /// Sender side of the pair-event channel. The pair watcher task
     /// (re-spawned on every application registration) forwards every
-    /// phone-pubkey write here. The receiver is owned by the daemon
-    /// (returned from `new()`) and drives bond derivation +
-    /// persistence + `add_peer`.
-    pair_event_tx: mpsc::Sender<[u8; PAIR_PUBKEY_LEN]>,
+    /// phone-pubkey write here, paired with the host_pubkey that was
+    /// being served at the time of the write. The receiver is owned
+    /// by the daemon (returned from `new()`) and drives bond
+    /// derivation + persistence + `add_peer`.
+    pair_event_tx: mpsc::Sender<([u8; PAIR_PUBKEY_LEN], [u8; PAIR_PUBKEY_LEN])>,
     /// JoinHandle for the pair watcher task spawned by the most
     /// recent application registration. Aborted before re-spawning
     /// so we never have two watchers competing on stale control
@@ -338,7 +339,9 @@ impl PersistentPeripheral {
     /// Returns [`PeripheralError::AdapterMissing`] when the named
     /// adapter is unknown to BlueZ, or [`PeripheralError::Backend`]
     /// for any other upstream failure.
-    pub async fn new(adapter_id: &str) -> Result<(Arc<Self>, mpsc::Receiver<[u8; PAIR_PUBKEY_LEN]>), PeripheralError> {
+    pub async fn new(
+        adapter_id: &str,
+    ) -> Result<(Arc<Self>, mpsc::Receiver<([u8; PAIR_PUBKEY_LEN], [u8; PAIR_PUBKEY_LEN])>), PeripheralError> {
         let session = bluer::Session::new()
             .await
             .map_err(|err| PeripheralError::from(map_adapter_open_error(adapter_id, err)))?;
@@ -388,10 +391,11 @@ impl PersistentPeripheral {
         getrandom::fill(&mut host_pubkey).map_err(|err| PeripheralError::Backend {
             reason: format!("host_pubkey rng: {err}"),
         })?;
-        // mpsc channel the pair watcher task forwards phone-pubkey
-        // writes to. Depth 8 absorbs concurrent retries without
-        // back-pressuring the BlueZ GATT-write thread.
-        let (pair_event_tx, pair_event_rx) = mpsc::channel::<[u8; PAIR_PUBKEY_LEN]>(8);
+        // mpsc channel the pair watcher task forwards
+        // (host_pubkey, phone_pubkey) pairs to. Depth 8 absorbs
+        // concurrent retries without back-pressuring the BlueZ
+        // GATT-write thread.
+        let (pair_event_tx, pair_event_rx) = mpsc::channel::<([u8; PAIR_PUBKEY_LEN], [u8; PAIR_PUBKEY_LEN])>(8);
         let peripheral = Arc::new(Self {
             _session: session,
             adapter,
@@ -564,9 +568,11 @@ impl PersistentPeripheral {
         }
         // Spawn the pair watcher: every CharacteristicControlEvent::Write
         // on the phone-pubkey characteristic is a phone trying to
-        // commit a pair. Read 32 bytes, forward to pair_event_tx,
-        // continue (the channel consumer drives bond persistence).
+        // commit a pair. Read 32 bytes, forward (host_pubkey,
+        // phone_pubkey) to pair_event_tx, continue (the channel
+        // consumer drives bond persistence).
         let pair_event_tx = self.pair_event_tx.clone();
+        let host_pubkey_for_watcher = self.host_pubkey;
         let task = tokio::spawn(async move {
             loop {
                 let evt = match pair_control.next().await {
@@ -591,7 +597,7 @@ impl PersistentPeripheral {
                 match reader.read_exact(&mut buf).await {
                     Ok(_) => {
                         tracing::info!(target: "syauth_transport", "pair watcher: phone pubkey received");
-                        if let Err(err) = pair_event_tx.send(buf).await {
+                        if let Err(err) = pair_event_tx.send((host_pubkey_for_watcher, buf)).await {
                             tracing::warn!(target: "syauth_transport", error = %err, "pair watcher: forward to event channel failed; daemon receiver gone");
                             break;
                         }

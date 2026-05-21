@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use syauth_core::{BondStatus, BondStore};
+use syauth_core::{Bond, BondStatus, BondStore, bond_key_from_pubkeys, peer_id_from_pubkey};
 use syauth_transport::{BOND_KEY_BYTES, DEFAULT_ADAPTER_NAME, FakePeripheral, Peripheral, PersistentPeripheral};
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -335,32 +335,28 @@ async fn maybe_spawn_orchestrator(
             return (None, None, None);
         }
     };
-    let (peripheral, pair_events): (Arc<dyn Peripheral + Send + Sync>, Option<tokio::sync::mpsc::Receiver<[u8; 32]>>) =
-        match config.peripheral_mode {
-            PeripheralMode::Real => match PersistentPeripheral::new(DEFAULT_ADAPTER_NAME).await {
-                Ok((p, rx)) => (p, Some(rx)),
-                Err(err) => {
-                    warn_no_orchestrator(&format!("BlueZ adapter open failed: {err}"));
-                    return (None, None, None);
-                }
-            },
-            PeripheralMode::Fake => (seed_fake_peripheral(config), None),
-        };
-    // Pair-event consumer: a phone-pubkey write to the pair-mode
-    // characteristic surfaces here. Bond derivation + persistence
-    // lands in the follow-up step; this task just logs the event
-    // so a real pair attempt is visible in `journalctl` before the
-    // persistence path is wired.
-    if let Some(mut rx) = pair_events {
-        tokio::spawn(async move {
-            while let Some(phone_pubkey) = rx.recv().await {
-                tracing::info!(
-                    target: "syauth_presenced",
-                    pubkey_hex = %hex::encode(phone_pubkey),
-                    "pair: phone pubkey received (persistence pending)"
-                );
+    type PairEventRx = tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>;
+    let (peripheral, pair_events): (Arc<dyn Peripheral + Send + Sync>, Option<PairEventRx>) = match config.peripheral_mode {
+        PeripheralMode::Real => match PersistentPeripheral::new(DEFAULT_ADAPTER_NAME).await {
+            Ok((p, rx)) => (p, Some(rx)),
+            Err(err) => {
+                warn_no_orchestrator(&format!("BlueZ adapter open failed: {err}"));
+                return (None, None, None);
             }
-        });
+        },
+        PeripheralMode::Fake => (seed_fake_peripheral(config), None),
+    };
+    // Pair-event consumer: every phone-pubkey write to the pair
+    // characteristic surfaces here. We derive the bond_key via the
+    // canonical HKDF (host_pubkey ‖ phone_pubkey), persist the bond
+    // record + per-peer key file, and add the peer to the live set
+    // so notify_challenge can target it immediately. No CLI
+    // involvement; the desktop never prompts.
+    if let Some(rx) = pair_events {
+        let bonds_path = config.bonds_file.clone();
+        let keys_dir = config.keys_dir.clone();
+        let peripheral_for_pair = Arc::clone(&peripheral);
+        tokio::spawn(pair_event_consumer(rx, bonds_path, keys_dir, peripheral_for_pair));
     }
     // Register the seed bond with the peripheral so `notify_challenge`
     // / `wait_for_response` calls in `Orchestrator::issue_challenge`
@@ -497,4 +493,109 @@ fn load_bond_key(keys_dir: &Path, peer_id: &str) -> Result<[u8; BOND_KEY_BYTES],
 /// short-circuits in [`maybe_spawn_orchestrator`] read uniformly.
 fn warn_no_orchestrator(reason: &str) {
     tracing::warn!(reason, "orchestrator not started; daemon will serve socket only");
+}
+
+/// Consume pair events from the peripheral's pair watcher. Each event
+/// is a `(host_pubkey, phone_pubkey)` pair the phone wrote to the
+/// pair-mode characteristic after completing LESC bonding. The
+/// consumer derives the canonical bond_key, persists the bond record
+/// and per-peer key file, and calls `add_peer` on the live peripheral
+/// so subsequent challenges target the new peer.
+///
+/// Best-effort: a failure on any step logs a warn and continues — the
+/// phone will retry the write if the link stays alive, or the user
+/// will rerun pair if the link dropped. We never panic the daemon on
+/// a malformed pair attempt.
+async fn pair_event_consumer(
+    mut rx: tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>,
+    bonds_path: std::path::PathBuf,
+    keys_dir: std::path::PathBuf,
+    peripheral: Arc<dyn Peripheral + Send + Sync>,
+) {
+    while let Some((host_pubkey, phone_pubkey)) = rx.recv().await {
+        let peer_id = peer_id_from_pubkey(&phone_pubkey);
+        let bond_key = bond_key_from_pubkeys(&host_pubkey, &phone_pubkey);
+        tracing::info!(
+            target: "syauth_presenced",
+            peer_id = %peer_id,
+            "pair: deriving bond and persisting"
+        );
+        // 1. Write the per-peer key file at <keys_dir>/<peer_id>.bin.
+        //    Permissions match the established convention used by
+        //    `syauth pair`: 0600, parent dir created on first run.
+        if let Err(err) = persist_pair_bond_key(&keys_dir, &peer_id, &bond_key) {
+            tracing::warn!(
+                target: "syauth_presenced",
+                peer_id = %peer_id,
+                error = %err,
+                "pair: bond key write failed"
+            );
+            continue;
+        }
+        // 2. Add the bond record to bonds.toml. We use `--force`-style
+        //    semantics: any existing record for this peer_id is
+        //    replaced (the phone explicitly chose to pair again).
+        let bond = Bond {
+            peer_id: peer_id.clone(),
+            pubkey: phone_pubkey,
+            name: PAIR_DEFAULT_BOND_NAME.to_string(),
+            created_at: ::time::OffsetDateTime::now_utc(),
+            status: BondStatus::Bonded,
+        };
+        if let Err(err) = persist_pair_bond_record(&bonds_path, bond) {
+            tracing::warn!(
+                target: "syauth_presenced",
+                peer_id = %peer_id,
+                error = %err,
+                "pair: bond record write failed"
+            );
+            continue;
+        }
+        // 3. Add to the live peripheral so the per-peer service is
+        //    registered and `notify_challenge(peer_id, ...)` resolves.
+        if let Err(err) = peripheral.add_peer(&peer_id, &bond_key).await {
+            tracing::warn!(
+                target: "syauth_presenced",
+                peer_id = %peer_id,
+                error = %err,
+                "pair: peripheral.add_peer failed"
+            );
+            continue;
+        }
+        tracing::info!(
+            target: "syauth_presenced",
+            peer_id = %peer_id,
+            "pair: bond committed; peer is live"
+        );
+    }
+    tracing::info!(target: "syauth_presenced", "pair_event_consumer: channel closed");
+}
+
+/// Default name surfaced in `syauth list` for a bond minted by the
+/// daemon's pair flow (operator never typed a name on the desktop).
+const PAIR_DEFAULT_BOND_NAME: &str = "phone (paired via daemon)";
+
+/// Write a 32-byte bond key to `<keys_dir>/<peer_id>.bin` with mode
+/// 0600. Creates `keys_dir` if it does not exist with mode 0700.
+fn persist_pair_bond_key(keys_dir: &Path, peer_id: &str, bond_key: &[u8; BOND_KEY_BYTES]) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(keys_dir)?;
+    let _ = std::fs::set_permissions(keys_dir, std::fs::Permissions::from_mode(0o700));
+    let path = keys_dir.join(format!("{peer_id}{BOND_KEY_FILE_EXT}"));
+    std::fs::write(&path, bond_key)?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
+}
+
+/// Load `bonds_path`, replace-or-add the bond record, save back.
+/// `--force` semantics: any existing record for the same peer_id is
+/// replaced; the phone explicitly chose to pair again.
+fn persist_pair_bond_record(bonds_path: &Path, bond: Bond) -> Result<(), syauth_core::BondError> {
+    let mut store = BondStore::load(bonds_path)?;
+    if store.list().iter().any(|b| b.peer_id == bond.peer_id) {
+        store.remove(&bond.peer_id)?;
+    }
+    store.add(bond)?;
+    store.save(bonds_path)?;
+    Ok(())
 }
