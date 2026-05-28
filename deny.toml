@@ -48,13 +48,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
-    "Zlib",
     "MPL-2.0",
     "CC0-1.0",
-    "0BSD",
 ]
 exceptions = []
 
@@ -72,7 +68,36 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 deny = []
-skip = []
+# Acknowledged duplicate versions. Each is pulled transitively by a
+# dependency we do not control and cannot be unified with the version
+# our own crates select. The multiple-versions check stays active for
+# every crate NOT listed here, so a duplicate we *can* fix still warns.
+#
+#   * Old RustCrypto generation (block-buffer 0.10, cpufeatures 0.2,
+#     crypto-common 0.1, digest 0.10, hkdf 0.12, hmac 0.12, sha2 0.10):
+#     pulled by `secret-service`/`aes` and the `*-dalek` crates. Our
+#     own crates are already on the new generation (digest 0.11, sha2
+#     0.11, hmac 0.13, hkdf 0.13).
+#   * getrandom 0.2 / 0.4: transitive; our crates use getrandom 0.3.
+#   * toml 0.5 and the `zbus`/`proc-macro-crate` toml stack
+#     (toml_edit 0.25, toml_datetime 1.1, winnow 1.0): we depend on
+#     toml 0.8, which pins toml_edit 0.22 / toml_datetime 0.6 /
+#     winnow 0.7.
+skip = [
+    { crate = "block-buffer@0.10.4" },
+    { crate = "cpufeatures@0.2.17" },
+    { crate = "crypto-common@0.1.7" },
+    { crate = "digest@0.10.7" },
+    { crate = "getrandom@0.2.17" },
+    { crate = "getrandom@0.4.2" },
+    { crate = "hkdf@0.12.4" },
+    { crate = "hmac@0.12.1" },
+    { crate = "sha2@0.10.9" },
+    { crate = "toml@0.5.11" },
+    { crate = "toml_datetime@1.1.1+spec-1.1.0" },
+    { crate = "toml_edit@0.25.11+spec-1.1.0" },
+    { crate = "winnow@1.0.3" },
+]
 skip-tree = []
 
 # ---------------------------------------------------------------------------
