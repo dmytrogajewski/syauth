@@ -564,7 +564,12 @@ async fn pair_event_consumer(
         //    bonds.toml, diff against its live peer set, and call
         //    `peripheral.add_peer` itself so the rotation loop and
         //    the peripheral state stay coherent.
-        if let Err(err) = reload_tx.send(ReloadCommand { trigger: ReloadTrigger::Pair }).await {
+        if let Err(err) = reload_tx
+            .send(ReloadCommand {
+                trigger: ReloadTrigger::Pair,
+            })
+            .await
+        {
             tracing::warn!(
                 target: "syauth_presenced",
                 peer_id = %peer_id,

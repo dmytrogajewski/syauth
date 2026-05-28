@@ -355,12 +355,9 @@ impl PersistentPeripheral {
         // at any time, without requiring a separate `syauth pair` process
         // to flip these flags. The daemon is the sole BlueZ client on the
         // desktop; it owns these settings for its lifetime.
-        adapter
-            .set_discoverable(true)
-            .await
-            .map_err(|err| PeripheralError::Backend {
-                reason: format!("adapter set_discoverable: {err}"),
-            })?;
+        adapter.set_discoverable(true).await.map_err(|err| PeripheralError::Backend {
+            reason: format!("adapter set_discoverable: {err}"),
+        })?;
         adapter.set_pairable(true).await.map_err(|err| PeripheralError::Backend {
             reason: format!("adapter set_pairable: {err}"),
         })?;
@@ -484,7 +481,10 @@ impl PersistentPeripheral {
     /// `secure_*` flags are needed.
     fn build_pair_service(
         host_pubkey: [u8; PAIR_PUBKEY_LEN],
-    ) -> (Service, impl futures::Stream<Item = CharacteristicControlEvent> + Send + Unpin + 'static) {
+    ) -> (
+        Service,
+        impl futures::Stream<Item = CharacteristicControlEvent> + Send + Unpin + 'static,
+    ) {
         let (chal_control, chal_handle) = characteristic_control();
         let service = Service {
             uuid: SYAUTH_PAIR_SERVICE_UUID,
@@ -863,8 +863,7 @@ impl PersistentPeripheral {
             );
         }
         // Build + register a fresh application for this peer.
-        let (notifier_slot, response_tx, response_rx, task) =
-            self.build_and_register_peer(&bond_key).await?;
+        let (notifier_slot, response_tx, response_rx, task) = self.build_and_register_peer(&bond_key).await?;
         // Swap the new state into the peer entry. `bond_key` is
         // copied (it is a `[u8; N]`) so the new entry stays
         // self-contained.

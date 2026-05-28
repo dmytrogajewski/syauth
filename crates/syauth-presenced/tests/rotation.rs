@@ -135,7 +135,11 @@ async fn rotates_at_minute_boundary() {
         })
         .collect();
     for (i, recorded) in calls.iter().enumerate() {
-        assert_eq!(recorded.len(), 2, "call #{i} should be a 2-element UUID set (peer + pair), got {recorded:?}");
+        assert_eq!(
+            recorded.len(),
+            2,
+            "call #{i} should be a 2-element UUID set (peer + pair), got {recorded:?}"
+        );
         for uuid in recorded {
             assert!(
                 allowed.contains(uuid),
