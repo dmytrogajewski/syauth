@@ -39,6 +39,7 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -50,6 +51,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 private const val TEST_PEER_ID: String = "alex-desktop"
 private const val TEST_DEVICE_MAC: String = "AA:BB:CC:DD:EE:FF"
@@ -160,6 +162,43 @@ class PersistentGattClientTest {
         assertEquals(true, opener.lastAutoConnect)
         assertEquals(TEST_DEVICE_MAC, opener.lastDevice?.address)
         assertNotNull(opener.lastCallback)
+    }
+
+    @Test
+    fun start_arms_reconnect_watchdog_without_state_callback() {
+        // BUG-20260528-2334: a connectGatt(autoConnect=true) that never
+        // completes emits NO onConnectionStateChange callback, so the
+        // reconnect watchdog — which used to be armed only on
+        // STATE_DISCONNECTED — was never scheduled and the client
+        // wedged forever in a never-completing background scan. The
+        // desktop then saw notifier_slot=None on every unlock. start()
+        // must arm the watchdog itself so a stalled initial connect is
+        // retried after RECONNECT_INTERVAL_MS with no user action.
+        val handle = newShadowGatt()
+        val opener = RecordingOpener(handle)
+        val client = PersistentGattClient(
+            context = ctx(),
+            adapter = BluetoothAdapter.getDefaultAdapter(),
+            peerId = TEST_PEER_ID,
+            deviceMac = TEST_DEVICE_MAC,
+            onChallenge = { _, _ -> },
+            gattOpener = opener,
+        )
+
+        client.start()
+        assertEquals("initial connectGatt issued", 1, opener.openCalls)
+
+        // No connection callback fires (the autoConnect scan never
+        // matches the peer). Advance the main looper past the watchdog
+        // cadence — the watchdog must re-issue connectGatt on its own.
+        shadowOf(Looper.getMainLooper())
+            .idleFor(PersistentGattClient.RECONNECT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+
+        assertEquals(
+            "watchdog re-issues connectGatt when the initial autoConnect never completes",
+            2,
+            opener.openCalls,
+        )
     }
 
     @Test

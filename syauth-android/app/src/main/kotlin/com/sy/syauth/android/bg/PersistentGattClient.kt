@@ -194,7 +194,9 @@ public class PersistentGattClient internal constructor(
      * `forceReconnect()` from a watchdog converts that into a
      * deterministic ~RECONNECT_INTERVAL_MS recovery window.
      *
-     * The watchdog reschedules itself unconditionally — successful
+     * The watchdog re-arms itself through `forceReconnect()` →
+     * `start()` (which schedules the next tick), so a single tick
+     * keeps the cadence going until the link is up. Successful
      * reconnects clear it via `STATE_CONNECTED` in the callback, and
      * `stop()` clears it directly. The `stopped` guard prevents a
      * tick that fires concurrently with `stop()` from reopening the
@@ -208,7 +210,6 @@ public class PersistentGattClient internal constructor(
                 "watchdog: still disconnected after ${RECONNECT_INTERVAL_MS}ms — forcing reconnect"
             )
             forceReconnect()
-            reconnectHandler.postDelayed(this, RECONNECT_INTERVAL_MS)
         }
     }
 
@@ -232,6 +233,19 @@ public class PersistentGattClient internal constructor(
             return
         }
         gatt.set(handle)
+        // BUG-20260528-0130 → BUG-20260528-2334: arm the reconnect
+        // watchdog NOW, not only on STATE_DISCONNECTED. A
+        // connectGatt(autoConnect=true) that never completes emits NO
+        // onConnectionStateChange callback at all (e.g. the desktop was
+        // mid-`serve_gatt_application` re-registration, briefly out of
+        // range, or Android's low-duty-cycle background scan stalled),
+        // so the disconnected-path scheduling never runs and the client
+        // would wedge forever in a never-completing scan — the desktop
+        // then audits notifier_slot=None / transport-error on every
+        // unlock. A fast successful connect cancels this pending tick via
+        // STATE_CONNECTED before it fires; a stalled connect is retried.
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.postDelayed(reconnectRunnable, RECONNECT_INTERVAL_MS)
     }
 
     /**
